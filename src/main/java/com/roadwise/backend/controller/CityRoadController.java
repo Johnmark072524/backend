@@ -1,16 +1,9 @@
 package com.roadwise.backend.controller;
 
-import com.roadwise.backend.model.Barangay;
 import com.roadwise.backend.model.CityRoad;
+import com.roadwise.backend.repository.CityRoadRepository; // <-- This is the correct import!
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.repository.Repository;
 import org.springframework.web.bind.annotation.*;
-// Note: You will need a CityRoadRepository for this to work!
-import com.roadwise.backend.
-
-interface BarangayRepository extends Repository<Barangay, Long> {
-    
-}.CityRoadRepository;
 
 import java.util.List;
 

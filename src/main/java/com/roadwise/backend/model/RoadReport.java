@@ -2,6 +2,8 @@ package com.roadwise.backend.model;
 
 import jakarta.persistence.*;
 
+import java.time.LocalDate;
+
 @Entity
 @Table(name = "reports")
 public class RoadReport {
@@ -31,6 +33,19 @@ public class RoadReport {
     // --- 3. System & Analytics Tracking ---
     private Integer inventoryYear;
     private String status;
+
+    // Keep ONLY this relationship in your model
+    @ManyToOne
+    @JoinColumn(name = "barangay_id")
+    private Barangay barangay;
+
+    private String severity;
+    private java.time.LocalDate dateSubmitted;
+    // This tells Spring Boot: "Right before you save to PostgreSQL, grab today's date!"
+    @PrePersist
+    public void prePersist() {
+        this.dateSubmitted = java.time.LocalDate.now();
+    }
 
     // Empty constructor required by Spring
     public RoadReport() {
@@ -181,5 +196,29 @@ public class RoadReport {
 
     public void setCvConfidenceScore(Double cvConfidenceScore) {
         this.cvConfidenceScore = cvConfidenceScore;
+    }
+
+    public Barangay getBarangay() {
+        return barangay;
+    }
+
+    public void setBarangay(Barangay barangay) {
+        this.barangay = barangay;
+    }
+
+    public String getSeverity() {
+        return severity;
+    }
+
+    public void setSeverity(String severity) {
+        this.severity = severity;
+    }
+
+    public LocalDate getDateSubmitted() {
+        return dateSubmitted;
+    }
+
+    public void setDateSubmitted(LocalDate dateSubmitted) {
+        this.dateSubmitted = dateSubmitted;
     }
 }

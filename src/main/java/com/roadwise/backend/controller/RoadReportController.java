@@ -15,7 +15,7 @@ import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/reports")
-@CrossOrigin(origins = "*")
+@CrossOrigin(origins = "http://localhost:63342")
 public class RoadReportController {
 
     @Autowired

@@ -13,7 +13,7 @@ import java.util.Optional;
 
 @RestController
 @RequestMapping("/api/auth")
-@CrossOrigin(origins = "*") // This allows your frontend to talk to this backend
+@CrossOrigin(origins = "http://localhost:63342") // This allows your frontend to talk to this backend
 public class AuthController {
 
     @Autowired

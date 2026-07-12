@@ -9,7 +9,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/roads")
-@CrossOrigin(origins = "*") // Allows your frontend to connect safely
+@CrossOrigin(origins = "http://localhost:63342")// Allows your frontend to connect safely
 public class CityRoadController {
 
     @Autowired

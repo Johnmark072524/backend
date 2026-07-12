@@ -79,4 +79,11 @@ public class RoadReportController {
     public List<RoadReport> getAllReports() {
         return repository.findAll();
     }
+
+    @GetMapping("/{id}")
+    public org.springframework.http.ResponseEntity<RoadReport> getReportById(@PathVariable Long id) {
+        return repository.findById(id)
+                .map(org.springframework.http.ResponseEntity::ok)
+                .orElse(org.springframework.http.ResponseEntity.notFound().build());
+    }
 }

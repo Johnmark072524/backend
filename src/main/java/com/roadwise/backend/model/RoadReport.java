@@ -35,6 +35,10 @@ public class RoadReport {
     private Integer inventoryYear;
     private String status;
 
+    // This holds the Admin's rejection feedback!
+    @Column(columnDefinition = "TEXT")
+    private String adminRemarks;
+
     // ⬇️ ADD THIS EXACT LINE TO FIX THE JSON INFINITE LOOP ⬇️
     // Keep ONLY this relationship in your model
     @com.fasterxml.jackson.annotation.JsonManagedReference // ⬇️ THIS IS THE NEW LINE ⬇️
@@ -223,5 +227,13 @@ public class RoadReport {
 
     public void setDateSubmitted(LocalDate dateSubmitted) {
         this.dateSubmitted = dateSubmitted;
+    }
+
+    public String getAdminRemarks() {
+        return adminRemarks;
+    }
+
+    public void setAdminRemarks(String adminRemarks) {
+        this.adminRemarks = adminRemarks;
     }
 }

@@ -88,22 +88,30 @@ public class RoadReportController {
     }
     // ⬇️ NEW ENDPOINT: Updates a report's status (Accept or Reject)
     // ⬇️ THE ULTIMATE BYPASS ENDPOINT ⬇️
+    // ⬇️ UPGRADED BYPASS ENDPOINT: Now handles Rejection Remarks! ⬇️
     @PutMapping("/{id}/status")
     public org.springframework.http.ResponseEntity<String> updateReportStatus(
             @PathVariable Long id,
             @RequestBody java.util.Map<String, String> payload) {
 
         return repository.findById(id).map(report -> {
-            // 1. Update the status
-            String newStatus = payload.get("status");
-            report.setStatus(newStatus);
 
-            // 2. Save to database
+            // 1. Always update the status (e.g., "Validated" or "Rejected")
+            if (payload.containsKey("status")) {
+                report.setStatus(payload.get("status"));
+            }
+
+            // 2. If the frontend sent feedback remarks, save them!
+            if (payload.containsKey("adminRemarks")) {
+                report.setAdminRemarks(payload.get("adminRemarks"));
+            }
+
+            // 3. Save to database and return text
             repository.save(report);
-
-            // 3. Return pure, simple text! No JSON, no loops, no proxies!
             return org.springframework.http.ResponseEntity.ok("SUCCESS");
 
         }).orElse(org.springframework.http.ResponseEntity.notFound().build());
     }
+
+
 }

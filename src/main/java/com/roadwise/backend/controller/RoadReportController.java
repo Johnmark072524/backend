@@ -86,4 +86,24 @@ public class RoadReportController {
                 .map(org.springframework.http.ResponseEntity::ok)
                 .orElse(org.springframework.http.ResponseEntity.notFound().build());
     }
+    // ⬇️ NEW ENDPOINT: Updates a report's status (Accept or Reject)
+    // ⬇️ THE ULTIMATE BYPASS ENDPOINT ⬇️
+    @PutMapping("/{id}/status")
+    public org.springframework.http.ResponseEntity<String> updateReportStatus(
+            @PathVariable Long id,
+            @RequestBody java.util.Map<String, String> payload) {
+
+        return repository.findById(id).map(report -> {
+            // 1. Update the status
+            String newStatus = payload.get("status");
+            report.setStatus(newStatus);
+
+            // 2. Save to database
+            repository.save(report);
+
+            // 3. Return pure, simple text! No JSON, no loops, no proxies!
+            return org.springframework.http.ResponseEntity.ok("SUCCESS");
+
+        }).orElse(org.springframework.http.ResponseEntity.notFound().build());
+    }
 }

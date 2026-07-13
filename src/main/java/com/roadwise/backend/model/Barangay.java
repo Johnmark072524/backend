@@ -4,6 +4,8 @@ import jakarta.persistence.*;
 
 @Entity
 @Table(name = "barangays")
+// ⬇️ THIS IS THE MAGIC LINE THAT STOPS THE CRASH ⬇️
+@com.fasterxml.jackson.annotation.JsonIgnoreProperties({"hibernateLazyInitializer", "handler"})
 public class Barangay {
 
     @Id

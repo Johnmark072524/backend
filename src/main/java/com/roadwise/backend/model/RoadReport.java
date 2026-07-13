@@ -8,6 +8,7 @@ import java.time.LocalDate;
 @Table(name = "reports")
 public class RoadReport {
 
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -34,8 +35,10 @@ public class RoadReport {
     private Integer inventoryYear;
     private String status;
 
+    // ⬇️ ADD THIS EXACT LINE TO FIX THE JSON INFINITE LOOP ⬇️
     // Keep ONLY this relationship in your model
-    @ManyToOne
+    @com.fasterxml.jackson.annotation.JsonManagedReference // ⬇️ THIS IS THE NEW LINE ⬇️
+    @ManyToOne(fetch = FetchType.EAGER)                    // ⬇️ FORCE IT TO LOAD ⬇️
     @JoinColumn(name = "barangay_id")
     private Barangay barangay;
 

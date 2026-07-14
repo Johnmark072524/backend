@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.http.ResponseEntity;
 
 @RestController
 @RequestMapping("/api/reports")
@@ -113,5 +114,56 @@ public class RoadReportController {
         }).orElse(org.springframework.http.ResponseEntity.notFound().build());
     }
 
+    @GetMapping("/barangay/{barangayId}")
+    public java.util.List<RoadReport> getReportsByBarangay(@PathVariable Long barangayId) {
+        return repository.findByBarangay_Id(barangayId);
+    }
+
+    @PutMapping("/update/{id}")
+    public ResponseEntity<?> updateReport(@PathVariable Long id,
+                                          @RequestParam(value = "damageDescription", required = false) String description,
+                                          @RequestParam(value = "length", required = false) Double length,
+                                          @RequestParam(value = "width", required = false) Double width,
+                                          @RequestParam(value = "lengthOfCulverts", required = false) Double lengthOfCulverts,
+                                          @RequestParam(value = "numberOfBridges", required = false) Integer numberOfBridges,
+
+                                          // ⬇️ CATCH THE NEW GPS DATA HERE ⬇️
+                                          @RequestParam(value = "latitude", required = false) Double latitude,
+                                          @RequestParam(value = "longitude", required = false) Double longitude,
+
+                                          @RequestParam(value = "imageFile", required = false) org.springframework.web.multipart.MultipartFile imageFile) {
+        try {
+            RoadReport existingReport = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
+
+            // ⬇️ Update all the original fields
+            if (description != null) existingReport.setDamageDescription(description);
+            if (length != null) existingReport.setLength(length);
+            if (width != null) existingReport.setWidth(width);
+            if (lengthOfCulverts != null) existingReport.setLengthOfCulverts(lengthOfCulverts);
+            if (numberOfBridges != null) existingReport.setNumberOfBridges(numberOfBridges);
+
+            // ⬇️ SAVE THE NEW GPS DATA TO THE DATABASE ⬇️
+            if (latitude != null) existingReport.setLatitude(latitude);
+            if (longitude != null) existingReport.setLongitude(longitude);
+
+            // Handle Image Upload (Exactly as you had it!)
+            if (imageFile != null && !imageFile.isEmpty()) {
+                String fileName = java.util.UUID.randomUUID().toString() + "_" + imageFile.getOriginalFilename();
+                java.nio.file.Path filePath = java.nio.file.Paths.get("uploads", fileName);
+                java.nio.file.Files.copy(imageFile.getInputStream(), filePath);
+                existingReport.setDamageImage(fileName);
+            }
+
+            // Reset status back to Pending for Admin review (Exactly as you had it!)
+            existingReport.setStatus("Pending");
+            existingReport.setAdminRemarks(null);
+
+            repository.save(existingReport);
+            return ResponseEntity.ok().body("Report updated successfully");
+
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body("Error updating report: " + e.getMessage());
+        }
+    }
 
 }

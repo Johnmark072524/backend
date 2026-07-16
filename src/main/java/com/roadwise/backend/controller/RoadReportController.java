@@ -127,26 +127,34 @@ public class RoadReportController {
                                           @RequestParam(value = "lengthOfCulverts", required = false) Double lengthOfCulverts,
                                           @RequestParam(value = "numberOfBridges", required = false) Integer numberOfBridges,
 
-                                          // ⬇️ CATCH THE NEW GPS DATA HERE ⬇️
                                           @RequestParam(value = "latitude", required = false) Double latitude,
                                           @RequestParam(value = "longitude", required = false) Double longitude,
+
+                                          // ⬇️ CATCH THE 3 NEW DAMAGE FIELDS HERE ⬇️
+                                          @RequestParam(value = "damageType", required = false) String damageType,
+                                          @RequestParam(value = "damageLength", required = false) Double damageLength,
+                                          @RequestParam(value = "damageWidth", required = false) Double damageWidth,
 
                                           @RequestParam(value = "imageFile", required = false) org.springframework.web.multipart.MultipartFile imageFile) {
         try {
             RoadReport existingReport = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
 
-            // ⬇️ Update all the original fields
+            // Update all the original fields
             if (description != null) existingReport.setDamageDescription(description);
             if (length != null) existingReport.setLength(length);
             if (width != null) existingReport.setWidth(width);
             if (lengthOfCulverts != null) existingReport.setLengthOfCulverts(lengthOfCulverts);
             if (numberOfBridges != null) existingReport.setNumberOfBridges(numberOfBridges);
 
-            // ⬇️ SAVE THE NEW GPS DATA TO THE DATABASE ⬇️
             if (latitude != null) existingReport.setLatitude(latitude);
             if (longitude != null) existingReport.setLongitude(longitude);
 
-            // Handle Image Upload (Exactly as you had it!)
+            // ⬇️ SAVE THE 3 NEW DAMAGE FIELDS TO THE DATABASE ⬇️
+            if (damageType != null) existingReport.setDamageType(damageType);
+            if (damageLength != null) existingReport.setDamageLength(damageLength);
+            if (damageWidth != null) existingReport.setDamageWidth(damageWidth);
+
+            // Handle Image Upload
             if (imageFile != null && !imageFile.isEmpty()) {
                 String fileName = java.util.UUID.randomUUID().toString() + "_" + imageFile.getOriginalFilename();
                 java.nio.file.Path filePath = java.nio.file.Paths.get("uploads", fileName);
@@ -154,8 +162,7 @@ public class RoadReportController {
                 existingReport.setDamageImage(fileName);
             }
 
-            // Reset status back to Pending for Admin review (Exactly as you had it!)
-            existingReport.setStatus("Pending");
+            existingReport.setStatus("Pending Validation");
             existingReport.setAdminRemarks(null);
 
             repository.save(existingReport);

@@ -31,6 +31,10 @@ public class RoadReport {
     private Double latitude;
     private Double longitude;
 
+    private String damageType;
+    private Double damageLength;
+    private Double damageWidth;
+
     // --- 3. System & Analytics Tracking ---
     private Integer inventoryYear;
     private String status;
@@ -41,7 +45,7 @@ public class RoadReport {
 
     // ⬇️ ADD THIS EXACT LINE TO FIX THE JSON INFINITE LOOP ⬇️
     // Keep ONLY this relationship in your model
-    @com.fasterxml.jackson.annotation.JsonManagedReference // ⬇️ THIS IS THE NEW LINE ⬇️
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties({"reports", "hibernateLazyInitializer", "handler"})// ⬇️ THIS IS THE NEW LINE ⬇️
     @ManyToOne(fetch = FetchType.EAGER)                    // ⬇️ FORCE IT TO LOAD ⬇️
     @JoinColumn(name = "barangay_id")
     private Barangay barangay;
@@ -235,5 +239,29 @@ public class RoadReport {
 
     public void setAdminRemarks(String adminRemarks) {
         this.adminRemarks = adminRemarks;
+    }
+
+    public String getDamageType() {
+        return damageType;
+    }
+
+    public void setDamageType(String damageType) {
+        this.damageType = damageType;
+    }
+
+    public Double getDamageLength() {
+        return damageLength;
+    }
+
+    public void setDamageLength(Double damageLength) {
+        this.damageLength = damageLength;
+    }
+
+    public Double getDamageWidth() {
+        return damageWidth;
+    }
+
+    public void setDamageWidth(Double damageWidth) {
+        this.damageWidth = damageWidth;
     }
 }

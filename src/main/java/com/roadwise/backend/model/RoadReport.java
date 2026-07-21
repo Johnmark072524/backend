@@ -43,6 +43,11 @@ public class RoadReport {
     @Column(columnDefinition = "TEXT")
     private String adminRemarks;
 
+    // 🚀 NEW: CEO Repair Proof Tracking
+    @Column(columnDefinition = "TEXT")
+    private String repairRemarks;
+    private String proofOfRepairImage;
+
     // ⬇️ ADD THIS EXACT LINE TO FIX THE JSON INFINITE LOOP ⬇️
     // Keep ONLY this relationship in your model
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties({"reports", "hibernateLazyInitializer", "handler"})// ⬇️ THIS IS THE NEW LINE ⬇️
@@ -201,6 +206,22 @@ public class RoadReport {
         this.cvDamageClassification = cvDamageClassification;
     }
 
+    public String getRepairRemarks() {
+        return repairRemarks;
+    }
+
+    public void setRepairRemarks(String repairRemarks) {
+        this.repairRemarks = repairRemarks;
+    }
+
+    public String getProofOfRepairImage() {
+        return proofOfRepairImage;
+    }
+
+    public void setProofOfRepairImage(String proofOfRepairImage) {
+        this.proofOfRepairImage = proofOfRepairImage;
+    }
+
     public Double getCvConfidenceScore() {
         return cvConfidenceScore;
     }
@@ -265,3 +286,5 @@ public class RoadReport {
         this.damageWidth = damageWidth;
     }
 }
+
+

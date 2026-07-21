@@ -173,4 +173,73 @@ public class RoadReportController {
         }
     }
 
+    // ==========================================
+    // 🚀 CEO HANDOFF: MASTERLIST BATCH DISPATCH
+    // ==========================================
+    @PutMapping("/dispatch-masterlist")
+    public ResponseEntity<String> dispatchMasterlistToCEO() {
+        try {
+            List<RoadReport> allReports = repository.findAll();
+            int dispatchedCount = 0;
+
+            for (RoadReport report : allReports) {
+                if ("Validated".equalsIgnoreCase(report.getStatus().trim())) {
+                    report.setStatus("Dispatched to CEO");
+                    dispatchedCount++;
+                }
+            }
+
+            if (dispatchedCount > 0) {
+                repository.saveAll(allReports);
+                return ResponseEntity.ok("Successfully dispatched " + dispatchedCount + " prioritized reports to the CEO!");
+            } else {
+                return ResponseEntity.badRequest().body("No 'Validated' reports found to dispatch.");
+            }
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body("Error dispatching masterlist: " + e.getMessage());
+        }
+    }
+
+    // ==========================================
+    // 🚀 NEW: CEO MARK AS COMPLETED (WITH PROOF)
+    // ==========================================
+    @PostMapping(value = "/{id}/complete", consumes = {"multipart/form-data"})
+    public ResponseEntity<?> completeReport(
+            @PathVariable Long id,
+            @RequestParam(value = "repairRemarks", required = false) String repairRemarks,
+            @RequestParam(value = "proofImage", required = true) MultipartFile proofImage) {
+
+        try {
+            RoadReport report = repository.findById(id)
+                    .orElseThrow(() -> new RuntimeException("Report not found"));
+
+            // 1. Handle Proof Image
+            if (proofImage != null && !proofImage.isEmpty()) {
+                Path uploadPath = Paths.get(UPLOAD_DIR);
+                if (!Files.exists(uploadPath)) Files.createDirectories(uploadPath);
+
+                String fileName = UUID.randomUUID().toString() + "_" + proofImage.getOriginalFilename();
+                Path filePath = uploadPath.resolve(fileName);
+                Files.copy(proofImage.getInputStream(), filePath);
+
+                report.setProofOfRepairImage(fileName);
+            }
+
+            // 2. Handle Text Remarks
+            if (repairRemarks != null) {
+                report.setRepairRemarks(repairRemarks);
+            }
+
+            // 3. Update Status
+            report.setStatus("Completed");
+            repository.save(report);
+
+            return ResponseEntity.ok().body(java.util.Map.of("message", "Project marked as Completed!"));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body(java.util.Map.of("error", "Error completing repair: " + e.getMessage()));
+        }
+    }
+
 }

@@ -9,9 +9,14 @@ public class CorsConfig implements WebMvcConfigurer {
 
     @Override
     public void addCorsMappings(CorsRegistry registry) {
-        registry.addMapping("/**") // Apply this to ALL endpoints (Login, Roads, Reports)
-                .allowedOrigins("http://localhost:63342", "http://127.0.0.1:63342") // Allow your IntelliJ frontend
-                .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS") // Allow these commands
+        registry.addMapping("/**") // Apply this to ALL endpoints
+                .allowedOrigins(
+                        "http://localhost:63342",
+                        "http://127.0.0.1:63342",
+                        "https://frontend-capstone-fawn.vercel.app/login.html", // 🚀 1. Put your actual Vercel URL here
+                        "https://ngrok.com/docs/errors/err_ngrok_4018"       // 🚀 2. Put your active Ngrok URL here (Optional, but safe)
+                )
+                .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                 .allowedHeaders("*")
                 .allowCredentials(true);
     }

@@ -13,7 +13,7 @@ public class CorsConfig implements WebMvcConfigurer {
                 .allowedOrigins(
                         "http://localhost:63342",
                         "http://127.0.0.1:63342",
-                        "https://frontend-capstone-fawn.vercel.app/login.html", // 🚀 1. Put your actual Vercel URL here
+                        "https://frontend-capstone-fawn.vercel.app", // 🚀 1. Put your actual Vercel URL here
                         "https://vitamins-april-unify.ngrok-free.dev"       // 🚀 2. Put your active Ngrok URL here (Optional, but safe)
                 )
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")

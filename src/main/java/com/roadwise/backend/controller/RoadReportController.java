@@ -162,7 +162,15 @@ public class RoadReportController {
                 existingReport.setDamageImage(fileName);
             }
 
-            existingReport.setStatus("Pending Validation");
+            // ⬇️ SMART STATUS UPDATE: Only mark as 'Resubmitted' if it was previously 'Rejected'
+            String currentStatus = existingReport.getStatus();
+            if (currentStatus != null && currentStatus.equalsIgnoreCase("Rejected")) {
+                existingReport.setStatus("Resubmitted");
+            } else {
+                existingReport.setStatus("Pending Validation");
+            }
+
+            // Always clear the rejection remarks since the official just edited the report
             existingReport.setAdminRemarks(null);
 
             repository.save(existingReport);

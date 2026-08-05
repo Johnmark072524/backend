@@ -29,6 +29,7 @@ public class WebConfig implements WebMvcConfigurer {
                 "http://localhost:63342",
                 "http://127.0.0.1:63342",
                 "https://frontend-capstone-fawn.vercel.app",
+                "https://frontend-capstone-7zkx2srtu-team-ratbu.vercel.app", // 🚀 EXACT VERCEL URL ADDED HERE
                 "https://vitamins-april-unify.ngrok-free.dev"
         ));
         config.setAllowedHeaders(Arrays.asList("*"));

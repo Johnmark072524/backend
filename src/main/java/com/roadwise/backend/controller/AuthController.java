@@ -10,41 +10,78 @@ import org.springframework.web.bind.annotation.*;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.time.LocalDateTime;
+import java.time.Duration;
 
 @RestController
 @RequestMapping("/api/auth")
-@CrossOrigin(origins = "${frontend.url}")// This allows your frontend to talk to this backend
+@CrossOrigin(origins = "${frontend.url}")
 public class AuthController {
 
     @Autowired
     private UserRepository userRepository;
 
+    // ==========================================
+    // SMART LOGIN TRACKER (BRUTE-FORCE PROTECTION)
+    // ==========================================
+    private static class LoginAttemptTracker {
+        int attempts = 0;
+        LocalDateTime lockoutTime = null;
+    }
+
+    // Tracks failed attempts by username
+    private static final Map<String, LoginAttemptTracker> loginTracker = new ConcurrentHashMap<>();
+
+    // 🚀 SINGLE UNIFIED LOGIN ENDPOINT
     @PostMapping("/login")
     public ResponseEntity<?> login(@RequestBody Map<String, String> credentials) {
         String username = credentials.get("username");
         String password = credentials.get("password");
 
-        // 1. Use your Search Tool to find the user
+        // 1. Grab or create the security tracker for this username
+        LoginAttemptTracker tracker = loginTracker.computeIfAbsent(username, k -> new LoginAttemptTracker());
+
+        // 2. Check if they are currently serving a 1-hour lockout
+        if (tracker.attempts >= 5 && tracker.lockoutTime != null) {
+            Duration duration = Duration.between(tracker.lockoutTime, LocalDateTime.now());
+
+            if (duration.toMinutes() < 60) {
+                long minutesLeft = 60 - duration.toMinutes();
+                return ResponseEntity.status(429).body(Map.of("error", "Account locked due to multiple failed logins. Try again in " + minutesLeft + " minute(s)."));
+            } else {
+                // The 1-hour penalty is over. Reset their tracker!
+                tracker.attempts = 0;
+                tracker.lockoutTime = null;
+            }
+        }
+
+        // 3. Find the user in the database
         Optional<User> userOpt = userRepository.findByUsername(username);
 
-        if (userOpt.isEmpty()) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid username or password.");
+        // 4. Validate the user and password
+        if (userOpt.isEmpty() || !userOpt.get().getPassword().equals(password)) {
+            tracker.attempts++;
+
+            // Did they just hit their 5th strike? Lock them out!
+            if (tracker.attempts >= 5) {
+                tracker.lockoutTime = LocalDateTime.now();
+                return ResponseEntity.status(429).body(Map.of("error", "Maximum attempts reached! Account locked for 1 hour for security."));
+            }
+
+            int remaining = 5 - tracker.attempts;
+            return ResponseEntity.status(401).body(Map.of("error", "Invalid credentials. " + remaining + " attempt(s) remaining."));
         }
 
+        // 5. Success! Clear their tracker and log them in
+        loginTracker.remove(username);
         User user = userOpt.get();
 
-        // 2. Check if the password matches
-        if (!user.getPassword().equals(password)) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid username or password.");
-        }
-
-        // 3. If they pass, pack up their "VIP Ticket" to send to the frontend
+        // 6. Build the "VIP Ticket" (Response Data)
         Map<String, Object> responseData = new HashMap<>();
         responseData.put("userId", user.getId());
         responseData.put("username", user.getUsername());
         responseData.put("role", user.getRole());
-
-        // 🚀 THE FIX: Send all the profile details to the frontend!
         responseData.put("firstName", user.getFirstName());
         responseData.put("middleName", user.getMiddleName());
         responseData.put("lastName", user.getLastName());

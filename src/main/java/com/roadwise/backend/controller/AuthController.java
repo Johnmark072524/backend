@@ -44,6 +44,16 @@ public class AuthController {
         responseData.put("username", user.getUsername());
         responseData.put("role", user.getRole());
 
+        // 🚀 THE FIX: Send all the profile details to the frontend!
+        responseData.put("firstName", user.getFirstName());
+        responseData.put("middleName", user.getMiddleName());
+        responseData.put("lastName", user.getLastName());
+        responseData.put("email", user.getEmail());
+        responseData.put("phoneNumber", user.getPhoneNumber());
+        responseData.put("birthday", user.getBirthday());
+        responseData.put("gender", user.getGender());
+        responseData.put("profilePicture", user.getProfilePicture());
+
         // If they are a Barangay Official, send their specific location!
         if (user.getBarangay() != null) {
             responseData.put("barangayId", user.getBarangay().getId());

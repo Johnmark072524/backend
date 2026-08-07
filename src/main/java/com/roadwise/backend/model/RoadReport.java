@@ -8,7 +8,6 @@ import java.time.LocalDate;
 @Table(name = "reports")
 public class RoadReport {
 
-
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -50,13 +49,21 @@ public class RoadReport {
 
     // ⬇️ ADD THIS EXACT LINE TO FIX THE JSON INFINITE LOOP ⬇️
     // Keep ONLY this relationship in your model
-    @com.fasterxml.jackson.annotation.JsonIgnoreProperties({"reports", "hibernateLazyInitializer", "handler"})// ⬇️ THIS IS THE NEW LINE ⬇️
-    @ManyToOne(fetch = FetchType.EAGER)                    // ⬇️ FORCE IT TO LOAD ⬇️
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties({"reports", "hibernateLazyInitializer", "handler"})
+    @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "barangay_id")
     private Barangay barangay;
 
+    // 🚀 THE FIX: Link the report to the User who submitted it!
+    @ManyToOne
+    @JoinColumn(name = "user_id")
+    private User user;
+
+    private String reportedBy;
+
     private String severity;
     private java.time.LocalDate dateSubmitted;
+
     // This tells Spring Boot: "Right before you save to PostgreSQL, grab today's date!"
     @PrePersist
     public void prePersist() {
@@ -238,6 +245,23 @@ public class RoadReport {
         this.barangay = barangay;
     }
 
+    // 🚀 THE FIX: Getters and Setters for the new User fields
+    public User getUser() {
+        return user;
+    }
+
+    public void setUser(User user) {
+        this.user = user;
+    }
+
+    public String getReportedBy() {
+        return reportedBy;
+    }
+
+    public void setReportedBy(String reportedBy) {
+        this.reportedBy = reportedBy;
+    }
+
     public String getSeverity() {
         return severity;
     }
@@ -286,5 +310,4 @@ public class RoadReport {
         this.damageWidth = damageWidth;
     }
 }
-
 

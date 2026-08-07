@@ -25,6 +25,10 @@ public class RoadReportController {
     @Autowired
     private com.roadwise.backend.repository.BarangayRepository barangayRepository;
 
+    // 🚀 ADDED: The UserRepository so we can find the person who submitted it!
+    @Autowired
+    private com.roadwise.backend.repository.UserRepository userRepository;
+
     // We will save uploaded photos into a folder named "uploads" in your project folder
     private static final String UPLOAD_DIR = "uploads/";
 
@@ -32,16 +36,28 @@ public class RoadReportController {
     @PostMapping(consumes = {"multipart/form-data"})
     public RoadReport createReport(
             @ModelAttribute RoadReport report,
-            // ⬇️ NEW: EXPLICITLY CATCH THE BARANGAY ID FROM THE FRONTEND ⬇️
             @RequestParam(value = "barangayId", required = false) Long barangayId,
+            // 🚀 ADDED: The userId parameter to catch exactly who submitted this report
+            @RequestParam(value = "userId", required = false) Long userId,
             @RequestParam(value = "imageFile", required = false) MultipartFile imageFile) {
 
         try {
-            // --- NEW: MANUALLY ATTACH THE BARANGAY ---
+            // --- MANUALLY ATTACH THE BARANGAY ---
             // This searches the database for the ID (e.g., 64) and attaches "Minuyan Proper"
             if (barangayId != null) {
                 com.roadwise.backend.model.Barangay foundBarangay = barangayRepository.findById(barangayId).orElse(null);
                 report.setBarangay(foundBarangay);
+            }
+
+            // 🚀 MANUALLY ATTACH THE USER
+            if (userId != null) {
+                com.roadwise.backend.model.User foundUser = userRepository.findById(userId).orElse(null);
+                report.setUser(foundUser);
+
+                // Fallback: Also save it as a text string just in case!
+                if (foundUser != null) {
+                    report.setReportedBy(foundUser.getFirstName() + " " + foundUser.getLastName());
+                }
             }
 
             // 1. Create the 'uploads' folder if it doesn't exist yet
@@ -78,7 +94,8 @@ public class RoadReportController {
 
     @GetMapping
     public List<RoadReport> getAllReports() {
-        return repository.findAll();
+        // 🚀 THE FIX: Sort by ID descending so the newest report is ALWAYS at the top!
+        return repository.findAll(org.springframework.data.domain.Sort.by(org.springframework.data.domain.Sort.Direction.DESC, "id"));
     }
 
     @GetMapping("/{id}")
@@ -87,8 +104,7 @@ public class RoadReportController {
                 .map(org.springframework.http.ResponseEntity::ok)
                 .orElse(org.springframework.http.ResponseEntity.notFound().build());
     }
-    // ⬇️ NEW ENDPOINT: Updates a report's status (Accept or Reject)
-    // ⬇️ THE ULTIMATE BYPASS ENDPOINT ⬇️
+
     // ⬇️ UPGRADED BYPASS ENDPOINT: Now handles Rejection Remarks! ⬇️
     @PutMapping("/{id}/status")
     public org.springframework.http.ResponseEntity<String> updateReportStatus(
@@ -116,7 +132,10 @@ public class RoadReportController {
 
     @GetMapping("/barangay/{barangayId}")
     public java.util.List<RoadReport> getReportsByBarangay(@PathVariable Long barangayId) {
-        return repository.findByBarangay_Id(barangayId);
+        // 🚀 THE FIX: Sort the Barangay's local reports by newest first too!
+        java.util.List<RoadReport> reports = repository.findByBarangay_Id(barangayId);
+        reports.sort((a, b) -> b.getId().compareTo(a.getId()));
+        return reports;
     }
 
     @PutMapping("/update/{id}")
@@ -249,5 +268,4 @@ public class RoadReportController {
             return ResponseEntity.status(500).body(java.util.Map.of("error", "Error completing repair: " + e.getMessage()));
         }
     }
-
 }

@@ -15,6 +15,7 @@ import java.time.LocalDate;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID; // 🚀 NEW: Required for unique filenames
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/users")
@@ -161,6 +162,117 @@ public class UserController {
         userRepository.save(user);
 
         return ResponseEntity.ok(Map.of("message", "Password updated successfully!"));
+    }
+
+    // ==========================================
+    // 4. FETCH ALL BARANGAY OFFICIALS (For Admin)
+    // ==========================================
+    @GetMapping("/officials")
+    public ResponseEntity<List<User>> getBarangayOfficials() {
+        // This explicitly asks the database ONLY for "BARANGAY" role users,
+        // permanently hiding the CPDO Admin and CEO accounts from the table!
+        List<User> officials = userRepository.findByRole("BARANGAY");
+        return ResponseEntity.ok(officials);
+    }
+
+    // You need this to link the new user to a specific Barangay!
+    @Autowired
+    private com.roadwise.backend.repository.BarangayRepository barangayRepository;
+
+    // ==========================================
+    // 5. PROVISION NEW BARANGAY OFFICIAL ACCOUNT
+    // ==========================================
+    @PostMapping("/register")
+    public ResponseEntity<?> registerOfficial(@RequestBody Map<String, String> payload) {
+
+        // 1. Security Check: Does this username already exist?
+        String username = payload.get("username");
+        if (userRepository.findByUsername(username).isPresent()) {
+            return ResponseEntity.status(400).body(Map.of("error", "Username already exists!"));
+        }
+
+        // 2. Create the new User
+        User newUser = new User();
+        newUser.setFirstName(payload.get("firstName"));
+        newUser.setMiddleName(payload.get("middleName")); // 🚀 NEW
+        newUser.setLastName(payload.get("lastName"));
+        newUser.setEmail(payload.get("email"));           // 🚀 NEW
+        newUser.setUsername(username);
+        newUser.setPassword(payload.get("password"));
+        newUser.setRole(payload.get("role"));
+
+        // Default new accounts to Active
+        newUser.setStatus("Active");
+
+        // 3. Link them to their Barangay Jurisdiction
+        if (payload.get("barangayId") != null && !payload.get("barangayId").isEmpty()) {
+            Long brgyId = Long.parseLong(payload.get("barangayId"));
+            barangayRepository.findById(brgyId).ifPresent(newUser::setBarangay);
+        }
+
+        // 4. Save to PostgreSQL
+        userRepository.save(newUser);
+
+        return ResponseEntity.ok(Map.of("message", "Official successfully provisioned!"));
+    }
+
+    // ==========================================
+    // 6. GET SINGLE USER DATA (For Manage Modal)
+    // ==========================================
+    @GetMapping("/{id}")
+    public ResponseEntity<User> getUserById(@PathVariable Long id) {
+        return userRepository.findById(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    // ==========================================
+    // 7. ADMIN: UPDATE OFFICIAL RECORD & STATUS
+    // ==========================================
+    @PutMapping("/{id}/manage")
+    public ResponseEntity<?> manageUserRecord(@PathVariable Long id, @RequestBody Map<String, String> updates) {
+        Optional<User> userOpt = userRepository.findById(id);
+        if (userOpt.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        User user = userOpt.get();
+        user.setFirstName(updates.get("firstName"));
+        user.setMiddleName(updates.get("middleName"));
+        user.setLastName(updates.get("lastName"));
+        user.setEmail(updates.get("email"));
+
+        // Critical: Update their access status (Active, Suspended, Deactivated)
+        if (updates.containsKey("status")) {
+            user.setStatus(updates.get("status"));
+        }
+
+        // Re-assign Barangay if the Admin moved them
+        if (updates.get("barangayId") != null && !updates.get("barangayId").isEmpty()) {
+            Long brgyId = Long.parseLong(updates.get("barangayId"));
+            barangayRepository.findById(brgyId).ifPresent(user::setBarangay);
+        }
+
+        userRepository.save(user);
+        return ResponseEntity.ok(Map.of("message", "Official record updated successfully!"));
+    }
+
+    // ==========================================
+    // 8. 🚨 ADMIN: EMERGENCY PASSWORD RESET
+    // ==========================================
+    @PutMapping("/{id}/emergency-reset")
+    public ResponseEntity<?> emergencyPasswordReset(@PathVariable Long id) {
+        Optional<User> userOpt = userRepository.findById(id);
+        if (userOpt.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        User user = userOpt.get();
+        // Reset to the exact system default
+        user.setPassword("RoadWise2026!");
+        userRepository.save(user);
+
+        return ResponseEntity.ok(Map.of("message", "Password successfully reset to default."));
     }
 
 }

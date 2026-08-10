@@ -33,6 +33,7 @@ public class User {
 
     // 🚀 NEW: PROFILE PICTURE (Stores the image file path)
     private String profilePicture;
+    private String status;
 
     // nullable = true allows CPDO and CEO accounts to leave this blank!
     @ManyToOne
@@ -121,5 +122,13 @@ public class User {
 
     public void setProfilePicture(String profilePicture) {
         this.profilePicture = profilePicture;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
     }
 }

@@ -77,6 +77,18 @@ public class AuthController {
         loginTracker.remove(username);
         User user = userOpt.get();
 
+        // ==========================================
+        // 🚀 NEW: STRICT ACCOUNT STATUS CHECK
+        // ==========================================
+        if ("Suspended".equalsIgnoreCase(user.getStatus())) {
+            return ResponseEntity.status(403).body(Map.of("error", "Your account is currently Suspended. Please contact the CPDO."));
+        }
+
+        if ("Deactivated".equalsIgnoreCase(user.getStatus())) {
+            return ResponseEntity.status(403).body(Map.of("error", "Your account has been Deactivated. Access revoked."));
+        }
+        // ==========================================
+
         // 6. Build the "VIP Ticket" (Response Data)
         Map<String, Object> responseData = new HashMap<>();
         responseData.put("userId", user.getId());

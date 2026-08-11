@@ -177,23 +177,20 @@ public class AuthController {
     }
 
     // ==========================================
-    // 5. 🚀 NEW: FORGOT PASSWORD REQUEST OTP
+    // 5. 🚀 UPGRADED: FORGOT PASSWORD REQUEST OTP
     // ==========================================
     @PostMapping("/forgot-password/request")
     public ResponseEntity<?> requestPasswordReset(@RequestBody Map<String, String> payload) {
-        String username = payload.get("username");
+        // 🚀 Now searching by Email instead of Username
+        String email = payload.get("email");
 
-        Optional<User> userOpt = userRepository.findByUsername(username);
+        Optional<User> userOpt = userRepository.findByEmail(email);
         if (userOpt.isEmpty()) {
-            // We return a generic error so hackers can't easily guess usernames
-            return ResponseEntity.status(404).body(Map.of("error", "If this Official ID exists, an email will be sent shortly."));
+            // We return a generic error so hackers can't easily guess registered emails
+            return ResponseEntity.status(404).body(Map.of("error", "If this email exists, a recovery code will be sent shortly."));
         }
 
         User user = userOpt.get();
-
-        if (user.getEmail() == null || user.getEmail().isEmpty()) {
-            return ResponseEntity.status(400).body(Map.of("error", "No email linked to this account. Contact the CPDO Administrator."));
-        }
 
         // Generate a 6-Digit Code for Password Reset
         String otp = String.format("%06d", new Random().nextInt(999999));
@@ -215,7 +212,7 @@ public class AuthController {
     }
 
     // ==========================================
-    // 6. 🚀 NEW: FORGOT PASSWORD VERIFY & RESET
+    // 6. FORGOT PASSWORD VERIFY & RESET
     // ==========================================
     @PostMapping("/forgot-password/reset")
     public ResponseEntity<?> resetPassword(@RequestBody Map<String, Object> payload) {

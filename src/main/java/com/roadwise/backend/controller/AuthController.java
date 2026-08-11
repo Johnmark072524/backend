@@ -36,7 +36,7 @@ public class AuthController {
     private static final Map<String, LoginAttemptTracker> loginTracker = new ConcurrentHashMap<>();
 
     // ==========================================
-    // 2. MFA (2FA) OTP TRACKER
+    // 2. MFA & OTP TRACKER
     // ==========================================
     private static class MfaSession {
         String otp;
@@ -48,8 +48,11 @@ public class AuthController {
         }
     }
 
-    // Temporarily stores the OTPs in server memory (Linked to the User's ID)
+    // Temporarily stores MFA OTPs
     private static final Map<Long, MfaSession> mfaTracker = new ConcurrentHashMap<>();
+
+    // Temporarily stores Password Reset OTPs
+    private static final Map<Long, MfaSession> resetTracker = new ConcurrentHashMap<>();
 
     // ==========================================
     // 3. STEP 1: CREDENTIALS & OTP GENERATION
@@ -59,13 +62,10 @@ public class AuthController {
         String username = credentials.get("username");
         String password = credentials.get("password");
 
-        // Grab or create the security tracker for this username
         LoginAttemptTracker tracker = loginTracker.computeIfAbsent(username, k -> new LoginAttemptTracker());
 
-        // Check if they are currently serving a 1-hour lockout
         if (tracker.attempts >= 5 && tracker.lockoutTime != null) {
             Duration duration = Duration.between(tracker.lockoutTime, LocalDateTime.now());
-
             if (duration.toMinutes() < 60) {
                 long minutesLeft = 60 - duration.toMinutes();
                 return ResponseEntity.status(429).body(Map.of("error", "Account locked due to multiple failed logins. Try again in " + minutesLeft + " minute(s)."));
@@ -75,10 +75,8 @@ public class AuthController {
             }
         }
 
-        // Find the user in the database
         Optional<User> userOpt = userRepository.findByUsername(username);
 
-        // Validate the user and password
         if (userOpt.isEmpty() || !userOpt.get().getPassword().equals(password)) {
             tracker.attempts++;
             if (tracker.attempts >= 5) {
@@ -89,11 +87,9 @@ public class AuthController {
             return ResponseEntity.status(401).body(Map.of("error", "Invalid credentials. " + remaining + " attempt(s) remaining."));
         }
 
-        // Success! Clear their brute-force tracker
         loginTracker.remove(username);
         User user = userOpt.get();
 
-        // Strict Account Status Check
         if ("Suspended".equalsIgnoreCase(user.getStatus())) {
             return ResponseEntity.status(403).body(Map.of("error", "Your account is currently Suspended. Please contact the CPDO."));
         }
@@ -101,18 +97,14 @@ public class AuthController {
             return ResponseEntity.status(403).body(Map.of("error", "Your account has been Deactivated. Access revoked."));
         }
 
-        // Check if the user has an email set up for MFA
         if (user.getEmail() == null || user.getEmail().isEmpty()) {
             return ResponseEntity.status(403).body(Map.of("error", "No official email is linked to this account. Cannot proceed with MFA. Contact Admin."));
         }
 
         // 🚀 GENERATE 6-DIGIT OTP
         String otp = String.format("%06d", new Random().nextInt(999999));
-
-        // Save the OTP in server memory, set to expire in 5 minutes
         mfaTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(5)));
 
-        // 🚀 SEND THE OTP EMAIL
         String subject = "RoadWise - Login Verification Code";
         String body = "Hello " + user.getFirstName() + ",\n\n" +
                 "Your Multi-Factor Authentication (MFA) code is: " + otp + "\n\n" +
@@ -121,7 +113,6 @@ public class AuthController {
 
         emailService.sendEmail(user.getEmail(), subject, body);
 
-        // Tell the frontend to switch to the MFA screen
         Map<String, Object> responseData = new HashMap<>();
         responseData.put("mfaRequired", true);
         responseData.put("userId", user.getId());
@@ -135,29 +126,24 @@ public class AuthController {
     // ==========================================
     @PostMapping("/verify-mfa")
     public ResponseEntity<?> verifyMfa(@RequestBody Map<String, Object> payload) {
-        // Safely parse the incoming JSON payload
         Long userId = Long.valueOf(payload.get("userId").toString());
         String submittedOtp = payload.get("otp").toString();
 
         MfaSession session = mfaTracker.get(userId);
 
-        // 1. Check if the session exists
         if (session == null) {
             return ResponseEntity.status(400).body(Map.of("error", "No active login session found. Please go back and log in again."));
         }
 
-        // 2. Check if the OTP is expired (Older than 5 minutes)
         if (LocalDateTime.now().isAfter(session.expiryTime)) {
             mfaTracker.remove(userId);
             return ResponseEntity.status(400).body(Map.of("error", "Verification code expired. Please go back and log in again."));
         }
 
-        // 3. Check if the OTP is wrong
         if (!session.otp.equals(submittedOtp)) {
             return ResponseEntity.status(401).body(Map.of("error", "Invalid verification code. Please try again."));
         }
 
-        // 4. OTP IS CORRECT! Clear the tracker so the OTP cannot be reused
         mfaTracker.remove(userId);
 
         Optional<User> userOpt = userRepository.findById(userId);
@@ -166,7 +152,6 @@ public class AuthController {
         }
         User user = userOpt.get();
 
-        // 5. Build the "VIP Ticket" (Response Data) to finally let them into the dashboard
         Map<String, Object> responseData = new HashMap<>();
         responseData.put("userId", user.getId());
         responseData.put("username", user.getUsername());
@@ -180,7 +165,6 @@ public class AuthController {
         responseData.put("gender", user.getGender());
         responseData.put("profilePicture", user.getProfilePicture());
 
-        // Attach Barangay location if applicable
         if (user.getBarangay() != null) {
             responseData.put("barangayId", user.getBarangay().getId());
             responseData.put("barangayName", user.getBarangay().getBarangayName());
@@ -190,5 +174,83 @@ public class AuthController {
         }
 
         return ResponseEntity.ok(responseData);
+    }
+
+    // ==========================================
+    // 5. 🚀 NEW: FORGOT PASSWORD REQUEST OTP
+    // ==========================================
+    @PostMapping("/forgot-password/request")
+    public ResponseEntity<?> requestPasswordReset(@RequestBody Map<String, String> payload) {
+        String username = payload.get("username");
+
+        Optional<User> userOpt = userRepository.findByUsername(username);
+        if (userOpt.isEmpty()) {
+            // We return a generic error so hackers can't easily guess usernames
+            return ResponseEntity.status(404).body(Map.of("error", "If this Official ID exists, an email will be sent shortly."));
+        }
+
+        User user = userOpt.get();
+
+        if (user.getEmail() == null || user.getEmail().isEmpty()) {
+            return ResponseEntity.status(400).body(Map.of("error", "No email linked to this account. Contact the CPDO Administrator."));
+        }
+
+        // Generate a 6-Digit Code for Password Reset
+        String otp = String.format("%06d", new Random().nextInt(999999));
+
+        // Save the OTP in server memory, set to expire in 10 minutes
+        resetTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(10)));
+
+        // Send the Email
+        String subject = "RoadWise - Password Reset Code";
+        String body = "Hello " + user.getFirstName() + ",\n\n" +
+                "You requested a password reset for your RoadWise account.\n\n" +
+                "Your 6-digit Password Reset Code is: " + otp + "\n\n" +
+                "This code will expire in 10 minutes.\n\n" +
+                "If you did not request this, please ignore this email and your password will remain unchanged.";
+
+        emailService.sendEmail(user.getEmail(), subject, body);
+
+        return ResponseEntity.ok(Map.of("message", "A 6-digit recovery code has been sent to your email.", "userId", user.getId()));
+    }
+
+    // ==========================================
+    // 6. 🚀 NEW: FORGOT PASSWORD VERIFY & RESET
+    // ==========================================
+    @PostMapping("/forgot-password/reset")
+    public ResponseEntity<?> resetPassword(@RequestBody Map<String, Object> payload) {
+        Long userId = Long.valueOf(payload.get("userId").toString());
+        String submittedOtp = payload.get("otp").toString();
+        String newPassword = payload.get("newPassword").toString();
+
+        MfaSession session = resetTracker.get(userId);
+
+        if (session == null) {
+            return ResponseEntity.status(400).body(Map.of("error", "No active password reset session. Please request a new code."));
+        }
+
+        if (LocalDateTime.now().isAfter(session.expiryTime)) {
+            resetTracker.remove(userId);
+            return ResponseEntity.status(400).body(Map.of("error", "Reset code has expired. Please request a new one."));
+        }
+
+        if (!session.otp.equals(submittedOtp)) {
+            return ResponseEntity.status(401).body(Map.of("error", "Invalid recovery code. Please try again."));
+        }
+
+        // Valid OTP! Find the user and change their password
+        Optional<User> userOpt = userRepository.findById(userId);
+        if (userOpt.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of("error", "User not found."));
+        }
+
+        User user = userOpt.get();
+        user.setPassword(newPassword);
+        userRepository.save(user);
+
+        // Clear the tracker so it can't be used twice
+        resetTracker.remove(userId);
+
+        return ResponseEntity.ok(Map.of("message", "Password successfully reset! You can now log in."));
     }
 }

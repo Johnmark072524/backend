@@ -32,6 +32,9 @@ public class RoadReportController {
     // We will save uploaded photos into a folder named "uploads" in your project folder
     private static final String UPLOAD_DIR = "uploads/";
 
+    @Autowired
+    private com.roadwise.backend.service.EmailService emailService;
+
     // Accepts 'multipart/form-data' (Files + Text) instead of JSON
     @PostMapping(consumes = {"multipart/form-data"})
     public RoadReport createReport(
@@ -105,7 +108,7 @@ public class RoadReportController {
                 .orElse(org.springframework.http.ResponseEntity.notFound().build());
     }
 
-    // ⬇️ UPGRADED BYPASS ENDPOINT: Now handles Rejection Remarks! ⬇️
+    // ⬇️ UPGRADED BYPASS ENDPOINT: Now handles Rejection Remarks & Email Notifications! ⬇️
     @PutMapping("/{id}/status")
     public org.springframework.http.ResponseEntity<String> updateReportStatus(
             @PathVariable Long id,
@@ -113,18 +116,39 @@ public class RoadReportController {
 
         return repository.findById(id).map(report -> {
 
+            String newStatus = payload.get("status");
+            String adminRemarks = payload.get("adminRemarks");
+
             // 1. Always update the status (e.g., "Validated" or "Rejected")
-            if (payload.containsKey("status")) {
-                report.setStatus(payload.get("status"));
+            if (newStatus != null) {
+                report.setStatus(newStatus);
             }
 
             // 2. If the frontend sent feedback remarks, save them!
-            if (payload.containsKey("adminRemarks")) {
-                report.setAdminRemarks(payload.get("adminRemarks"));
+            if (adminRemarks != null) {
+                report.setAdminRemarks(adminRemarks);
             }
 
-            // 3. Save to database and return text
+            // 3. Save to database
             repository.save(report);
+
+            // 4. 🚀 EMAIL TRIGGER: If rejected, email the Barangay Official with the feedback!
+            if ("Rejected".equalsIgnoreCase(newStatus) && report.getUser() != null) {
+                String officialEmail = report.getUser().getEmail();
+
+                if (officialEmail != null && !officialEmail.isEmpty()) {
+                    String subject = "RoadWise Alert: Report Requires Revision";
+                    String body = "Hello " + report.getUser().getFirstName() + ",\n\n" +
+                            "Your recent road damage report has been reviewed by the CPDO and requires your attention.\n\n" +
+                            "Status: 🔴 REJECTED\n" +
+                            "Admin Remarks: " + (adminRemarks != null ? adminRemarks : "No specific remarks provided.") + "\n\n" +
+                            "Please log into your RoadWise Barangay Dashboard, review the feedback, and click 'Edit & Resubmit' to correct the report.\n\n" +
+                            "Best regards,\nCPDO Administrator - RoadWise SJDM";
+
+                    emailService.sendEmail(officialEmail, subject, body);
+                }
+            }
+
             return org.springframework.http.ResponseEntity.ok("SUCCESS");
 
         }).orElse(org.springframework.http.ResponseEntity.notFound().build());

@@ -25,68 +25,54 @@ public class RoadReportController {
     @Autowired
     private com.roadwise.backend.repository.BarangayRepository barangayRepository;
 
-    // 🚀 ADDED: The UserRepository so we can find the person who submitted it!
     @Autowired
     private com.roadwise.backend.repository.UserRepository userRepository;
-
-    // We will save uploaded photos into a folder named "uploads" in your project folder
-    private static final String UPLOAD_DIR = "uploads/";
 
     @Autowired
     private com.roadwise.backend.service.EmailService emailService;
 
-    // Accepts 'multipart/form-data' (Files + Text) instead of JSON
+    private static final String UPLOAD_DIR = "uploads/";
+
+    // ==========================================
+    // 1. CREATE REPORT
+    // ==========================================
     @PostMapping(consumes = {"multipart/form-data"})
     public RoadReport createReport(
             @ModelAttribute RoadReport report,
             @RequestParam(value = "barangayId", required = false) Long barangayId,
-            // 🚀 ADDED: The userId parameter to catch exactly who submitted this report
             @RequestParam(value = "userId", required = false) Long userId,
             @RequestParam(value = "imageFile", required = false) MultipartFile imageFile) {
 
         try {
-            // --- MANUALLY ATTACH THE BARANGAY ---
-            // This searches the database for the ID (e.g., 64) and attaches "Minuyan Proper"
             if (barangayId != null) {
                 com.roadwise.backend.model.Barangay foundBarangay = barangayRepository.findById(barangayId).orElse(null);
                 report.setBarangay(foundBarangay);
             }
 
-            // 🚀 MANUALLY ATTACH THE USER
             if (userId != null) {
                 com.roadwise.backend.model.User foundUser = userRepository.findById(userId).orElse(null);
                 report.setUser(foundUser);
-
-                // Fallback: Also save it as a text string just in case!
                 if (foundUser != null) {
                     report.setReportedBy(foundUser.getFirstName() + " " + foundUser.getLastName());
                 }
             }
 
-            // 1. Create the 'uploads' folder if it doesn't exist yet
             Path uploadPath = Paths.get(UPLOAD_DIR);
             if (!Files.exists(uploadPath)) {
                 Files.createDirectories(uploadPath);
             }
 
-            // 2. Handle the Image File
             if (imageFile != null && !imageFile.isEmpty()) {
-                // Generate a unique ID for the image so two files named "pothole.jpg" don't overwrite each other!
                 String originalFilename = imageFile.getOriginalFilename();
                 String uniqueFilename = UUID.randomUUID().toString() + "_" + originalFilename;
-
-                // Save the physical picture to your hard drive
                 Path filePath = uploadPath.resolve(uniqueFilename);
                 Files.copy(imageFile.getInputStream(), filePath);
-
-                // Save JUST the unique name to PostgreSQL so we can find it later
                 report.setDamageImage(uniqueFilename);
             } else {
                 report.setDamageImage("no_image.jpg");
             }
 
-            // 3. Save the text data to PostgreSQL
-            report.setStatus("Pending Validation"); // Updated to match your frontend badge!
+            report.setStatus("Pending Validation");
             return repository.save(report);
 
         } catch (IOException e) {
@@ -97,7 +83,6 @@ public class RoadReportController {
 
     @GetMapping
     public List<RoadReport> getAllReports() {
-        // 🚀 THE FIX: Sort by ID descending so the newest report is ALWAYS at the top!
         return repository.findAll(org.springframework.data.domain.Sort.by(org.springframework.data.domain.Sort.Direction.DESC, "id"));
     }
 
@@ -108,7 +93,16 @@ public class RoadReportController {
                 .orElse(org.springframework.http.ResponseEntity.notFound().build());
     }
 
-    // ⬇️ UPGRADED BYPASS ENDPOINT: Now handles Rejection Remarks & Email Notifications! ⬇️
+    @GetMapping("/barangay/{barangayId}")
+    public java.util.List<RoadReport> getReportsByBarangay(@PathVariable Long barangayId) {
+        java.util.List<RoadReport> reports = repository.findByBarangay_Id(barangayId);
+        reports.sort((a, b) -> b.getId().compareTo(a.getId()));
+        return reports;
+    }
+
+    // ==========================================
+    // 2. 🚀 THE EMAIL SWITCHBOARD (STATUS UPDATES)
+    // ==========================================
     @PutMapping("/{id}/status")
     public org.springframework.http.ResponseEntity<String> updateReportStatus(
             @PathVariable Long id,
@@ -119,49 +113,27 @@ public class RoadReportController {
             String newStatus = payload.get("status");
             String adminRemarks = payload.get("adminRemarks");
 
-            // 1. Always update the status (e.g., "Validated" or "Rejected")
             if (newStatus != null) {
                 report.setStatus(newStatus);
             }
 
-            // 2. If the frontend sent feedback remarks, save them!
             if (adminRemarks != null) {
                 report.setAdminRemarks(adminRemarks);
             }
 
-            // 3. Save to database
             repository.save(report);
 
-            // 4. 🚀 EMAIL TRIGGER: If rejected, email the Barangay Official with the feedback!
-            if ("Rejected".equalsIgnoreCase(newStatus) && report.getUser() != null) {
-                String officialEmail = report.getUser().getEmail();
-
-                if (officialEmail != null && !officialEmail.isEmpty()) {
-                    String subject = "RoadWise Alert: Report Requires Revision";
-                    String body = "Hello " + report.getUser().getFirstName() + ",\n\n" +
-                            "Your recent road damage report has been reviewed by the CPDO and requires your attention.\n\n" +
-                            "Status: 🔴 REJECTED\n" +
-                            "Admin Remarks: " + (adminRemarks != null ? adminRemarks : "No specific remarks provided.") + "\n\n" +
-                            "Please log into your RoadWise Barangay Dashboard, review the feedback, and click 'Edit & Resubmit' to correct the report.\n\n" +
-                            "Best regards,\nCPDO Administrator - RoadWise SJDM";
-
-                    emailService.sendEmail(officialEmail, subject, body);
-                }
-            }
+            // 🚀 FIRE THE AUTOMATED EMAIL HELPER
+            sendStatusUpdateEmail(report, newStatus, adminRemarks);
 
             return org.springframework.http.ResponseEntity.ok("SUCCESS");
 
         }).orElse(org.springframework.http.ResponseEntity.notFound().build());
     }
 
-    @GetMapping("/barangay/{barangayId}")
-    public java.util.List<RoadReport> getReportsByBarangay(@PathVariable Long barangayId) {
-        // 🚀 THE FIX: Sort the Barangay's local reports by newest first too!
-        java.util.List<RoadReport> reports = repository.findByBarangay_Id(barangayId);
-        reports.sort((a, b) -> b.getId().compareTo(a.getId()));
-        return reports;
-    }
-
+    // ==========================================
+    // 3. UPDATE REPORT
+    // ==========================================
     @PutMapping("/update/{id}")
     public ResponseEntity<?> updateReport(@PathVariable Long id,
                                           @RequestParam(value = "damageDescription", required = false) String description,
@@ -169,35 +141,26 @@ public class RoadReportController {
                                           @RequestParam(value = "width", required = false) Double width,
                                           @RequestParam(value = "lengthOfCulverts", required = false) Double lengthOfCulverts,
                                           @RequestParam(value = "numberOfBridges", required = false) Integer numberOfBridges,
-
                                           @RequestParam(value = "latitude", required = false) Double latitude,
                                           @RequestParam(value = "longitude", required = false) Double longitude,
-
-                                          // ⬇️ CATCH THE 3 NEW DAMAGE FIELDS HERE ⬇️
                                           @RequestParam(value = "damageType", required = false) String damageType,
                                           @RequestParam(value = "damageLength", required = false) Double damageLength,
                                           @RequestParam(value = "damageWidth", required = false) Double damageWidth,
-
                                           @RequestParam(value = "imageFile", required = false) org.springframework.web.multipart.MultipartFile imageFile) {
         try {
             RoadReport existingReport = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
 
-            // Update all the original fields
             if (description != null) existingReport.setDamageDescription(description);
             if (length != null) existingReport.setLength(length);
             if (width != null) existingReport.setWidth(width);
             if (lengthOfCulverts != null) existingReport.setLengthOfCulverts(lengthOfCulverts);
             if (numberOfBridges != null) existingReport.setNumberOfBridges(numberOfBridges);
-
             if (latitude != null) existingReport.setLatitude(latitude);
             if (longitude != null) existingReport.setLongitude(longitude);
-
-            // ⬇️ SAVE THE 3 NEW DAMAGE FIELDS TO THE DATABASE ⬇️
             if (damageType != null) existingReport.setDamageType(damageType);
             if (damageLength != null) existingReport.setDamageLength(damageLength);
             if (damageWidth != null) existingReport.setDamageWidth(damageWidth);
 
-            // Handle Image Upload
             if (imageFile != null && !imageFile.isEmpty()) {
                 String fileName = java.util.UUID.randomUUID().toString() + "_" + imageFile.getOriginalFilename();
                 java.nio.file.Path filePath = java.nio.file.Paths.get("uploads", fileName);
@@ -205,7 +168,6 @@ public class RoadReportController {
                 existingReport.setDamageImage(fileName);
             }
 
-            // ⬇️ SMART STATUS UPDATE: Only mark as 'Resubmitted' if it was previously 'Rejected'
             String currentStatus = existingReport.getStatus();
             if (currentStatus != null && currentStatus.equalsIgnoreCase("Rejected")) {
                 existingReport.setStatus("Resubmitted");
@@ -213,10 +175,9 @@ public class RoadReportController {
                 existingReport.setStatus("Pending Validation");
             }
 
-            // Always clear the rejection remarks since the official just edited the report
             existingReport.setAdminRemarks(null);
-
             repository.save(existingReport);
+
             return ResponseEntity.ok().body("Report updated successfully");
 
         } catch (Exception e) {
@@ -225,7 +186,7 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 🚀 CEO HANDOFF: MASTERLIST BATCH DISPATCH
+    // 4. 🚀 UPGRADED: BATCH DISPATCH TO CEO
     // ==========================================
     @PutMapping("/dispatch-masterlist")
     public ResponseEntity<String> dispatchMasterlistToCEO() {
@@ -233,15 +194,28 @@ public class RoadReportController {
             List<RoadReport> allReports = repository.findAll();
             int dispatchedCount = 0;
 
+            // 🚀 SMART GROUPING: Group reports by the Official who submitted them
+            java.util.Map<com.roadwise.backend.model.User, java.util.List<RoadReport>> dispatchedByUser = new java.util.HashMap<>();
+
             for (RoadReport report : allReports) {
                 if ("Validated".equalsIgnoreCase(report.getStatus().trim())) {
                     report.setStatus("Dispatched to CEO");
                     dispatchedCount++;
+
+                    if (report.getUser() != null) {
+                        dispatchedByUser.computeIfAbsent(report.getUser(), k -> new java.util.ArrayList<>()).add(report);
+                    }
                 }
             }
 
             if (dispatchedCount > 0) {
                 repository.saveAll(allReports);
+
+                // 🚀 TRIGGER BATCH EMAILS
+                for (java.util.Map.Entry<com.roadwise.backend.model.User, java.util.List<RoadReport>> entry : dispatchedByUser.entrySet()) {
+                    sendBatchDispatchEmail(entry.getKey(), entry.getValue());
+                }
+
                 return ResponseEntity.ok("Successfully dispatched " + dispatchedCount + " prioritized reports to the CEO!");
             } else {
                 return ResponseEntity.badRequest().body("No 'Validated' reports found to dispatch.");
@@ -252,7 +226,7 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 🚀 NEW: CEO MARK AS COMPLETED (WITH PROOF)
+    // 5. 🚀 CEO MARK AS COMPLETED
     // ==========================================
     @PostMapping(value = "/{id}/complete", consumes = {"multipart/form-data"})
     public ResponseEntity<?> completeReport(
@@ -264,7 +238,6 @@ public class RoadReportController {
             RoadReport report = repository.findById(id)
                     .orElseThrow(() -> new RuntimeException("Report not found"));
 
-            // 1. Handle Proof Image
             if (proofImage != null && !proofImage.isEmpty()) {
                 Path uploadPath = Paths.get(UPLOAD_DIR);
                 if (!Files.exists(uploadPath)) Files.createDirectories(uploadPath);
@@ -276,14 +249,15 @@ public class RoadReportController {
                 report.setProofOfRepairImage(fileName);
             }
 
-            // 2. Handle Text Remarks
             if (repairRemarks != null) {
                 report.setRepairRemarks(repairRemarks);
             }
 
-            // 3. Update Status
             report.setStatus("Completed");
             repository.save(report);
+
+            // 🚀 FIRE THE AUTOMATED EMAIL HELPER
+            sendStatusUpdateEmail(report, "Completed", repairRemarks);
 
             return ResponseEntity.ok().body(java.util.Map.of("message", "Project marked as Completed!"));
 
@@ -291,5 +265,85 @@ public class RoadReportController {
             e.printStackTrace();
             return ResponseEntity.status(500).body(java.util.Map.of("error", "Error completing repair: " + e.getMessage()));
         }
+    }
+
+    // ==========================================
+    // 6. 🚀 EMAIL HELPER: SINGLE STATUS UPDATE
+    // ==========================================
+    private void sendStatusUpdateEmail(RoadReport report, String newStatus, String remarks) {
+        if (report.getUser() == null || report.getUser().getEmail() == null || report.getUser().getEmail().isEmpty()) {
+            return;
+        }
+
+        String officialEmail = report.getUser().getEmail();
+        String officialName = report.getUser().getFirstName();
+
+        // 🚀 FIXED: Using getCityRoadName() and getInventoryYear()
+        String trackingId = "RPT-" + report.getId() + " (Year: " + report.getInventoryYear() + ")";
+
+        String subject = "RoadWise Update: Status changed to " + newStatus;
+        StringBuilder body = new StringBuilder();
+
+        body.append("Hello ").append(officialName).append(",\n\n");
+        body.append("There is an update regarding your road report [").append(trackingId).append("] for ").append(report.getCityRoadName()).append(".\n\n");
+        body.append("Current Status: ").append(newStatus.toUpperCase()).append("\n\n");
+
+        switch (newStatus.toLowerCase()) {
+            case "rejected":
+                subject = "RoadWise Alert: Report Requires Revision";
+                body.append("The CPDO has reviewed your report but it requires corrections. Please log in, review the remarks below, and click 'Edit & Resubmit'.\n");
+                break;
+            case "validated":
+                body.append("Great job! The CPDO has successfully validated your report. It is now awaiting dispatch to the CEO Priority List.\n");
+                break;
+            case "in progress":
+                body.append("The City Engineering Office (CEO) is now actively working on this road repair!\n");
+                break;
+            case "pending budget":
+                subject = "RoadWise Update: Repair Deferred (Pending Budget)";
+                body.append("The CEO has reviewed the priority list. Due to current budget constraints, immediate repair for this road has been deferred. It remains securely in our system for future fiscal allocation.\n");
+                break;
+            case "completed":
+                subject = "RoadWise Update: Repair Pending Admin QA";
+                body.append("The City Engineering Office (CEO) has marked this repair as completed!.\n");
+                break;
+            default:
+                body.append("The status of your report has been updated.\n");
+        }
+
+        if (remarks != null && !remarks.trim().isEmpty()) {
+            body.append("\nRemarks: ").append(remarks).append("\n");
+        }
+
+        body.append("\nPlease log into your RoadWise Dashboard to view full details.\n\n");
+        body.append("Best regards,\nRoadWise SJDM System");
+
+        emailService.sendEmail(officialEmail, subject, body.toString());
+    }
+
+    // ==========================================
+    // 7. 🚀 EMAIL HELPER: BATCH DISPATCH LIST
+    // ==========================================
+    private void sendBatchDispatchEmail(com.roadwise.backend.model.User official, List<RoadReport> dispatchedReports) {
+        if (official.getEmail() == null || official.getEmail().isEmpty()) return;
+
+        String subject = "RoadWise: " + dispatchedReports.size() + " Reports Dispatched to CEO Priority List";
+        StringBuilder body = new StringBuilder();
+
+        body.append("Hello ").append(official.getFirstName()).append(",\n\n");
+        body.append("Good news! The CPDO has officially forwarded ").append(dispatchedReports.size())
+                .append(" of your validated road reports to the City Engineering Office (CEO) Priority List.\n\n");
+
+        body.append("Dispatched Roads:\n");
+        for (RoadReport r : dispatchedReports) {
+            // Safely fetch severity or default to "Unassigned"
+            String severity = r.getSeverity() != null ? r.getSeverity() : "Unassigned";
+            body.append("- ").append(r.getCityRoadName()).append(" (Severity: ").append(severity).append(")\n");
+        }
+
+        body.append("\nThe CEO will review this masterlist and allocate repair budgets accordingly. You will receive further updates once physical repairs begin.\n\n");
+        body.append("Best regards,\nRoadWise SJDM System");
+
+        emailService.sendEmail(official.getEmail(), subject, body.toString());
     }
 }

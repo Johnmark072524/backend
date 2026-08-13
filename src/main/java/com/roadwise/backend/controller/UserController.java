@@ -31,6 +31,10 @@ public class UserController {
     @Autowired
     private com.roadwise.backend.repository.BarangayRepository barangayRepository;
 
+    // 🚀 1. BRING IN THE NOTIFICATION SERVICE (THE "POST OFFICE")
+    @Autowired
+    private com.roadwise.backend.service.NotificationService notificationService;
+
     private static final String UPLOAD_DIR = "uploads/";
 
     // ==========================================
@@ -171,20 +175,31 @@ public class UserController {
             barangayRepository.findById(brgyId).ifPresent(newUser::setBarangay);
         }
 
-        userRepository.save(newUser);
+        // Save and store the generated user object to capture the ID
+        User savedUser = userRepository.save(newUser);
+
+        // ==========================================
+        // 🔔 2. TRIGGER REAL IN-APP NOTIFICATION!
+        // ==========================================
+        notificationService.sendNotification(
+                savedUser.getId(),
+                "Account Provisioned",
+                "Welcome to RoadWise! Your official account has been created by the City Admin. Please change your password for security.",
+                "ACCOUNT"
+        );
 
         // 🚀 EMAIL TRIGGER: Sends welcome credentials WITH the Vercel Link
-        if (newUser.getEmail() != null && !newUser.getEmail().isEmpty()) {
+        if (savedUser.getEmail() != null && !savedUser.getEmail().isEmpty()) {
             String subject = "Welcome to RoadWise - Your Account Credentials";
-            String emailBody = "Hello " + newUser.getFirstName() + ",\n\n" +
+            String emailBody = "Hello " + savedUser.getFirstName() + ",\n\n" +
                     "Your official RoadWise Barangay Official account has been provisioned.\n\n" +
-                    "Username: " + newUser.getUsername() + "\n" +
-                    "Temporary Password: " + newUser.getPassword() + "\n\n" +
+                    "Username: " + savedUser.getUsername() + "\n" +
+                    "Temporary Password: " + savedUser.getPassword() + "\n\n" +
                     "Please log in here: https://frontend-capstone-fawn.vercel.app/login.html\n\n" +
                     "For security purposes, please change your password immediately after logging in.\n\n" +
                     "Best regards,\nCPDO Administrator - RoadWise SJDM";
 
-            emailService.sendEmail(newUser.getEmail(), subject, emailBody);
+            emailService.sendEmail(savedUser.getEmail(), subject, emailBody);
         }
 
         return ResponseEntity.ok(Map.of("message", "Official successfully provisioned!"));
@@ -216,8 +231,21 @@ public class UserController {
         user.setLastName(updates.get("lastName"));
         user.setEmail(updates.get("email"));
 
+        // Optional Status change
         if (updates.containsKey("status")) {
-            user.setStatus(updates.get("status"));
+            String oldStatus = user.getStatus();
+            String newStatus = updates.get("status");
+            user.setStatus(newStatus);
+
+            // 🔔 BONUS: Trigger an alert if Admin changes their account status!
+            if (oldStatus != null && !oldStatus.equals(newStatus)) {
+                notificationService.sendNotification(
+                        user.getId(),
+                        "Account Status Update",
+                        "Your account status has been updated to: " + newStatus + ".",
+                        "ACCOUNT"
+                );
+            }
         }
 
         if (updates.get("barangayId") != null && !updates.get("barangayId").isEmpty()) {
@@ -242,6 +270,14 @@ public class UserController {
         User user = userOpt.get();
         user.setPassword("RoadWise2026!");
         userRepository.save(user);
+
+        // 🔔 NOTIFICATION TRIGGER: Let the official know their password was reset
+        notificationService.sendNotification(
+                user.getId(),
+                "Security Alert",
+                "Your password has been reset by the City Administrator. Please update it immediately.",
+                "SECURITY"
+        );
 
         return ResponseEntity.ok(Map.of("message", "Password successfully reset to default."));
     }

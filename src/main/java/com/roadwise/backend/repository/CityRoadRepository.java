@@ -10,5 +10,11 @@ import java.util.List;
 public interface CityRoadRepository extends JpaRepository<CityRoad, Long> {
 
     List<CityRoad> findByBarangayId(Long barangayId);
+    CityRoad findFirstByOrderByIdDesc();
+
+    boolean existsByRoadNameIgnoreCaseAndBarangayId(String roadName, Long barangayId);
+    // 🚀 NEW: Check for duplicates, but IGNORE the current road ID being edited!
+    boolean existsByRoadNameIgnoreCaseAndBarangayIdAndIdNot(String roadName, Long barangayId, Long id);
+
 
 }

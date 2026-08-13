@@ -13,6 +13,8 @@ public interface UserRepository extends JpaRepository<User, Long> {
     // Looks up a user by their username for logging in
     Optional<User> findByUsername(String username);
 
+    List<User> findByBarangayId(Long barangayId);
+
     // 🚀 NEW: Finds a massive list of users based on their role!
     List<User> findByRole(String role);
     Optional<User> findByEmail(String email);

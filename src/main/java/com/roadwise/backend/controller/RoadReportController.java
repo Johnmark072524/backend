@@ -49,6 +49,18 @@ public class RoadReportController {
     }
 
     // ==========================================
+    // 🚀 HELPER: DYNAMICALLY FIND CEO ID
+    // ==========================================
+    private Long getCeoId() {
+        return userRepository.findAll().stream()
+                .filter(user -> user.getRole() != null &&
+                        (user.getRole().equalsIgnoreCase("ENGINEER") || user.getRole().equalsIgnoreCase("City Engineer")))
+                .map(user -> user.getId())
+                .findFirst()
+                .orElse(null); // Returns null if no CEO exists yet
+    }
+
+    // ==========================================
     // 1. CREATE REPORT
     // ==========================================
     @PostMapping(consumes = {"multipart/form-data"})
@@ -182,9 +194,10 @@ public class RoadReportController {
             // ==========================================
             if (newStatus != null) {
                 Long adminId = getAdminId();
+                Long ceoId = getCeoId(); // 🚀 FETCH CEO ID
 
-                // 1. Admin Notifications (if CEO updates status)
-                if (newStatus.equalsIgnoreCase("In Progress") || newStatus.equalsIgnoreCase("Completed")) {
+                // 1. Admin Notifications (Only if CEO updates it naturally, NOT if Admin is doing a rework)
+                if (newStatus.equalsIgnoreCase("Completed") || (newStatus.equalsIgnoreCase("In Progress") && (adminRemarks == null || adminRemarks.trim().isEmpty()))) {
                     notificationService.sendNotification(
                             adminId,
                             "Report Status Update",
@@ -193,7 +206,34 @@ public class RoadReportController {
                     );
                 }
 
-                // 2. 🚀 Barangay Official Notifications (Strictly curated)
+                // 🚀 NEW 2. CEO Notification & Email (If Admin requests a REWORK)
+                if (newStatus.equalsIgnoreCase("In Progress") && adminRemarks != null && !adminRemarks.trim().isEmpty()) {
+                    if (ceoId != null) {
+                        // 1. Send the Bell Notification
+                        notificationService.sendNotification(
+                                ceoId,
+                                "Repair Rework Required",
+                                "The CPDO Admin has requested a rework for PRJ-" + report.getId() + ". Admin Remarks: " + adminRemarks,
+                                "REPORT"
+                        );
+
+                        // 2. 🚀 THE FIX: Send the Email to the CEO
+                        userRepository.findById(ceoId).ifPresent(ceo -> {
+                            if (ceo.getEmail() != null && !ceo.getEmail().isEmpty()) {
+                                String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
+                                String subject = "RoadWise Alert: Repair Rework Required for PRJ-" + report.getId();
+                                String body = "Hello " + ceo.getFirstName() + ",\n\n" +
+                                        "The CPDO Admin has reviewed the proof of repair for " + safeRoadName + " (PRJ-" + report.getId() + ") and has requested a rework.\n\n" +
+                                        "Admin Remarks: " + adminRemarks + "\n\n" +
+                                        "The project has been returned to your active queue. Please deploy the crew to address the feedback and upload new proof once completed.\n\n" +
+                                        "Best regards,\nRoadWise SJDM System";
+                                emailService.sendEmail(ceo.getEmail(), subject, body);
+                            }
+                        });
+                    }
+                }
+
+                // 3. Barangay Official Notifications (Strictly curated)
                 if (report.getUser() != null) {
                     Long brgyUserId = report.getUser().getId();
                     String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
@@ -206,13 +246,11 @@ public class RoadReportController {
                         notificationService.sendNotification(brgyUserId, "Report Rejected", "Report #PRJ-" + report.getId() + " requires corrections. Reason: " + reason, "REPORT");
                     }
                     else if (newStatus.equalsIgnoreCase("In Progress")) {
-                        // 🚀 ADDED: Now notifies them when physical repairs start!
-                        notificationService.sendNotification(brgyUserId, "Repair In Progress", "The City Engineering Office (CEO) has officially started repairs on " + safeRoadName + " (ID: PRJ-" + report.getId() + ").", "REPORT");
+                        notificationService.sendNotification(brgyUserId, "Repair In Progress", "The City Engineering Office (CEO) is actively working on " + safeRoadName + " (ID: PRJ-" + report.getId() + ").", "REPORT");
                     }
                     else if (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved")) {
                         notificationService.sendNotification(brgyUserId, "Project Officially Closed", "Success! The repair for #PRJ-" + report.getId() + " on " + safeRoadName + " has been verified and officially closed.", "REPORT");
                     }
-                    // NOTE: "Archived" and "Dispatched to CEO" have been intentionally omitted to prevent notification spam.
                 }
             }
             return org.springframework.http.ResponseEntity.ok("SUCCESS");
@@ -306,8 +344,38 @@ public class RoadReportController {
 
             if (dispatchedCount > 0) {
                 repository.saveAll(allReports);
-                // 🚀 REMOVED: Batch Dispatch emails & notifications to keep Barangay Official's inbox spam-free!
-                return ResponseEntity.ok("Successfully dispatched " + dispatchedCount + " prioritized reports to the CEO!");
+
+                // 🚀 THE FIX: We capture the final count into a new final variable for the lambda
+                final int finalDispatchedCount = dispatchedCount;
+
+                // ==========================================
+                // 🔔 & 📧 NEW: NOTIFY AND EMAIL THE CEO
+                // ==========================================
+                Long ceoId = getCeoId();
+                if (ceoId != null) {
+                    // 1. Send the Bell Notification
+                    notificationService.sendNotification(
+                            ceoId,
+                            "Masterlist Dispatched",
+                            "The CPDO has officially dispatched " + finalDispatchedCount + " validated road reports to your priority pool. Please review for budget allocation and deployment.",
+                            "REPORT"
+                    );
+
+                    // 2. 🚀 Send the Email to the CEO
+                    userRepository.findById(ceoId).ifPresent(ceo -> {
+                        if (ceo.getEmail() != null && !ceo.getEmail().isEmpty()) {
+                            String subject = "RoadWise: Masterlist Dispatched";
+                            String body = "Hello " + ceo.getFirstName() + ",\n\n" +
+                                    "The CPDO has officially dispatched " + finalDispatchedCount + " validated road reports to your priority pool.\n" +
+                                    "Please review the Engineering Dashboard.\n\n" +
+                                    "Best regards,\nRoadWise SJDM System";
+                            emailService.sendEmail(ceo.getEmail(), subject, body);
+                        }
+                    });
+                }
+                // ==========================================
+
+                return ResponseEntity.ok("Successfully dispatched " + finalDispatchedCount + " prioritized reports to the CEO!");
             } else {
                 return ResponseEntity.badRequest().body("No 'Validated' reports found to dispatch.");
             }
@@ -574,4 +642,52 @@ public class RoadReportController {
 
         emailService.sendEmail(official.getEmail(), subject, body.toString());
     }
+
+    // ==========================================
+    // 8. 🚀 ADMIN BATCH ARCHIVE (SILENT HOUSEKEEPING)
+    // ==========================================
+    @PostMapping("/batch/archive")
+    public ResponseEntity<?> batchArchiveReports(@RequestBody java.util.Map<String, Object> payload) {
+        try {
+            Object idsObj = payload.get("reportIds");
+
+            if (idsObj == null) {
+                return ResponseEntity.badRequest().body(java.util.Map.of("error", "No reports selected for archiving."));
+            }
+
+            // Safely convert JSON payload into Long IDs
+            java.util.List<Long> reportIds = new java.util.ArrayList<>();
+            if (idsObj instanceof java.util.List) {
+                for (Object id : (java.util.List<?>) idsObj) {
+                    reportIds.add(Long.valueOf(id.toString()));
+                }
+            }
+
+            if (reportIds.isEmpty()) return ResponseEntity.badRequest().body(java.util.Map.of("error", "No valid reports selected."));
+
+            List<RoadReport> reportsToArchive = repository.findAllById(reportIds);
+
+            if (reportsToArchive.isEmpty()) return ResponseEntity.status(404).body(java.util.Map.of("error", "Could not find the selected reports in the database."));
+
+            int archivedCount = 0;
+            for (RoadReport r : reportsToArchive) {
+                // Safety Check: Only allow archiving if the project is actually 'Pending Budget'
+                if ("Pending Budget".equalsIgnoreCase(r.getStatus())) {
+                    r.setStatus("Archived");
+                    archivedCount++;
+                }
+            }
+
+            repository.saveAll(reportsToArchive);
+
+            // 🚀 Notice: Absolutely NO email or notification triggers here. 100% silent!
+
+            return ResponseEntity.ok().body(java.util.Map.of("message", "Successfully archived " + archivedCount + " deferred reports."));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body(java.util.Map.of("error", "Error processing batch archive: " + e.getMessage()));
+        }
+    }
+
 }

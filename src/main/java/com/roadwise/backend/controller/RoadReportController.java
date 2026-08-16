@@ -35,6 +35,10 @@ public class RoadReportController {
     @Autowired
     private com.roadwise.backend.service.NotificationService notificationService;
 
+    @Autowired
+    private org.springframework.messaging.simp.SimpMessagingTemplate messagingTemplate;
+
+
     private static final String UPLOAD_DIR = "uploads/";
 
     // ==========================================
@@ -136,6 +140,8 @@ public class RoadReportController {
                 );
             }
 
+            // 🚀 THE REAL FIX: Broadcast MUST happen here, AFTER notifications are saved!
+            sendLiveUpdate();
             return savedReport;
 
         } catch (IOException e) {
@@ -253,6 +259,9 @@ public class RoadReportController {
                     }
                 }
             }
+
+            // 🚀 THE REAL FIX: Broadcast MUST happen here, AFTER notifications are saved!
+            sendLiveUpdate();
             return org.springframework.http.ResponseEntity.ok("SUCCESS");
 
         }).orElse(org.springframework.http.ResponseEntity.notFound().build());
@@ -319,6 +328,8 @@ public class RoadReportController {
                 );
             }
 
+            // 🚀 THE REAL FIX: Broadcast MUST happen here!
+            sendLiveUpdate();
             return ResponseEntity.ok().body("Report updated successfully");
 
         } catch (Exception e) {
@@ -375,6 +386,8 @@ public class RoadReportController {
                 }
                 // ==========================================
 
+                // 🚀 THE REAL FIX: Broadcast MUST happen here!
+                sendLiveUpdate();
                 return ResponseEntity.ok("Successfully dispatched " + finalDispatchedCount + " prioritized reports to the CEO!");
             } else {
                 return ResponseEntity.badRequest().body("No 'Validated' reports found to dispatch.");
@@ -459,6 +472,8 @@ public class RoadReportController {
                 sendBatchDeferEmail(entry.getKey(), entry.getValue(), reason);
             }
 
+            // 🚀 THE REAL FIX: Broadcast MUST happen here!
+            sendLiveUpdate();
             return ResponseEntity.ok().body(java.util.Map.of("message", "Successfully deferred " + reportsToDefer.size() + " selected reports."));
 
         } catch (Exception e) {
@@ -505,6 +520,8 @@ public class RoadReportController {
                     "REPORT"
             );
 
+            // 🚀 THE REAL FIX: Broadcast MUST happen here!
+            sendLiveUpdate();
             return ResponseEntity.ok().body(java.util.Map.of("message", "Project marked as Completed!"));
 
         } catch (Exception e) {
@@ -548,6 +565,8 @@ public class RoadReportController {
                 );
             }
 
+            // 🚀 THE REAL FIX: Broadcast MUST happen here!
+            sendLiveUpdate();
             return ResponseEntity.ok().body(java.util.Map.of("message", "Project marked as Pending Budget. CPDO Admin notified."));
 
         } catch (Exception e) {
@@ -681,12 +700,25 @@ public class RoadReportController {
             repository.saveAll(reportsToArchive);
 
             // 🚀 Notice: Absolutely NO email or notification triggers here. 100% silent!
+            sendLiveUpdate();
 
             return ResponseEntity.ok().body(java.util.Map.of("message", "Successfully archived " + archivedCount + " deferred reports."));
 
         } catch (Exception e) {
             e.printStackTrace();
             return ResponseEntity.status(500).body(java.util.Map.of("error", "Error processing batch archive: " + e.getMessage()));
+        }
+    }
+
+    // ==========================================
+    // 🚀 WEBSOCKET BROADCASTER (LIVE REFRESH)
+    // ==========================================
+    private void sendLiveUpdate() {
+        try {
+            // Sends a tiny invisible "REFRESH" pulse to all connected users
+            messagingTemplate.convertAndSend("/topic/updates", "REFRESH_DASHBOARDS");
+        } catch (Exception e) {
+            System.err.println("WebSocket Broadcast Failed: " + e.getMessage());
         }
     }
 

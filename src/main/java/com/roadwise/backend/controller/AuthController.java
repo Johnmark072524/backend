@@ -25,6 +25,21 @@ public class AuthController {
     @Autowired
     private com.roadwise.backend.service.EmailService emailService;
 
+    // 🚀 INJECTED NOTIFICATION SERVICE
+    @Autowired
+    private com.roadwise.backend.service.NotificationService notificationService;
+
+    // ==========================================
+    // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
+    // ==========================================
+    private Long getAdminId() {
+        return userRepository.findAll().stream()
+                .filter(user -> user.getRole() != null && (user.getRole().equalsIgnoreCase("CPDO Admin") || user.getRole().equalsIgnoreCase("Admin")))
+                .map(User::getId)
+                .findFirst()
+                .orElse(1L); // Fallback to 1 if no admin is found
+    }
+
     // ==========================================
     // 1. SMART LOGIN TRACKER (BRUTE-FORCE PROTECTION)
     // ==========================================
@@ -81,6 +96,19 @@ public class AuthController {
             tracker.attempts++;
             if (tracker.attempts >= 5) {
                 tracker.lockoutTime = LocalDateTime.now();
+
+                // ==========================================
+                // 🔔 NOTIFICATION TRIGGER: BRUTE-FORCE LOGIN
+                // ==========================================
+                Long adminId = getAdminId(); // 🚀 DYNAMIC ADMIN ID
+                notificationService.sendNotification(
+                        adminId,
+                        "Security Alert: Account Locked",
+                        "Multiple failed login attempts detected for username: '" + username + "'. Account has been temporarily locked for 1 hour.",
+                        "SECURITY"
+                );
+                // ==========================================
+
                 return ResponseEntity.status(429).body(Map.of("error", "Maximum attempts reached! Account locked for 1 hour for security."));
             }
             int remaining = 5 - tracker.attempts;
@@ -181,24 +209,18 @@ public class AuthController {
     // ==========================================
     @PostMapping("/forgot-password/request")
     public ResponseEntity<?> requestPasswordReset(@RequestBody Map<String, String> payload) {
-        // 🚀 Now searching by Email instead of Username
         String email = payload.get("email");
 
         Optional<User> userOpt = userRepository.findByEmail(email);
         if (userOpt.isEmpty()) {
-            // We return a generic error so hackers can't easily guess registered emails
             return ResponseEntity.status(404).body(Map.of("error", "If this email exists, a recovery code will be sent shortly."));
         }
 
         User user = userOpt.get();
 
-        // Generate a 6-Digit Code for Password Reset
         String otp = String.format("%06d", new Random().nextInt(999999));
-
-        // Save the OTP in server memory, set to expire in 10 minutes
         resetTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(10)));
 
-        // Send the Email
         String subject = "RoadWise - Password Reset Code";
         String body = "Hello " + user.getFirstName() + ",\n\n" +
                 "You requested a password reset for your RoadWise account.\n\n" +
@@ -207,6 +229,18 @@ public class AuthController {
                 "If you did not request this, please ignore this email and your password will remain unchanged.";
 
         emailService.sendEmail(user.getEmail(), subject, body);
+
+        // ==========================================
+        // 🔔 NOTIFICATION TRIGGER: FORGOT PASSWORD
+        // ==========================================
+        Long adminId = getAdminId(); // 🚀 DYNAMIC ADMIN ID
+        notificationService.sendNotification(
+                adminId,
+                "Support Request",
+                "Barangay Official " + user.getFirstName() + " " + user.getLastName() + " has requested a password reset. System has dispatched recovery email.",
+                "SUPPORT"
+        );
+        // ==========================================
 
         return ResponseEntity.ok(Map.of("message", "A 6-digit recovery code has been sent to your email.", "userId", user.getId()));
     }
@@ -235,7 +269,6 @@ public class AuthController {
             return ResponseEntity.status(401).body(Map.of("error", "Invalid recovery code. Please try again."));
         }
 
-        // Valid OTP! Find the user and change their password
         Optional<User> userOpt = userRepository.findById(userId);
         if (userOpt.isEmpty()) {
             return ResponseEntity.status(404).body(Map.of("error", "User not found."));
@@ -245,7 +278,6 @@ public class AuthController {
         user.setPassword(newPassword);
         userRepository.save(user);
 
-        // Clear the tracker so it can't be used twice
         resetTracker.remove(userId);
 
         return ResponseEntity.ok(Map.of("message", "Password successfully reset! You can now log in."));

@@ -31,7 +31,22 @@ public class RoadReportController {
     @Autowired
     private com.roadwise.backend.service.EmailService emailService;
 
+    // 🚀 INJECTED NOTIFICATION SERVICE
+    @Autowired
+    private com.roadwise.backend.service.NotificationService notificationService;
+
     private static final String UPLOAD_DIR = "uploads/";
+
+    // ==========================================
+    // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
+    // ==========================================
+    private Long getAdminId() {
+        return userRepository.findAll().stream()
+                .filter(user -> user.getRole() != null && (user.getRole().equalsIgnoreCase("CPDO Admin") || user.getRole().equalsIgnoreCase("Admin")))
+                .map(user -> user.getId())
+                .findFirst()
+                .orElse(1L); // Fallback to 1 if no admin is found
+    }
 
     // ==========================================
     // 1. CREATE REPORT
@@ -73,7 +88,43 @@ public class RoadReportController {
             }
 
             report.setStatus("Pending Validation");
-            return repository.save(report);
+
+            // Save the report first to get the ID
+            RoadReport savedReport = repository.save(report);
+
+            // ==========================================
+            // 🔔 SMART NOTIFICATION TRIGGER: ADMIN & BARANGAY
+            // ==========================================
+            Long adminId = getAdminId();
+
+            // 1. Notify the Admin
+            if (savedReport.getSeverity() != null && savedReport.getSeverity().equalsIgnoreCase("High")) {
+                notificationService.sendNotification(
+                        adminId,
+                        "🚨 CRITICAL HAZARD DETECTED",
+                        "System flagged a HIGH severity road damage reported by " + savedReport.getReportedBy() + ". Immediate CPDO review required!",
+                        "CRITICAL"
+                );
+            } else {
+                notificationService.sendNotification(
+                        adminId,
+                        "New Road Damage Report",
+                        "A new report has been submitted by " + savedReport.getReportedBy() + " and is awaiting CPDO review.",
+                        "REPORT"
+                );
+            }
+
+            // 2. Notify the Barangay Official (Submitter)
+            if (savedReport.getUser() != null) {
+                notificationService.sendNotification(
+                        savedReport.getUser().getId(),
+                        "Report Submitted Successfully",
+                        "Your damage report for " + savedReport.getCityRoadName() + " has been received by the CPDO and is awaiting initial validation.",
+                        "REPORT"
+                );
+            }
+
+            return savedReport;
 
         } catch (IOException e) {
             e.printStackTrace();
@@ -126,13 +177,51 @@ public class RoadReportController {
             // 🚀 FIRE THE AUTOMATED EMAIL HELPER
             sendStatusUpdateEmail(report, newStatus, adminRemarks);
 
+            // ==========================================
+            // 🔔 NOTIFICATION TRIGGER: STATUS UPDATES
+            // ==========================================
+            if (newStatus != null) {
+                Long adminId = getAdminId();
+
+                // 1. Admin Notifications (if CEO updates status)
+                if (newStatus.equalsIgnoreCase("In Progress") || newStatus.equalsIgnoreCase("Completed")) {
+                    notificationService.sendNotification(
+                            adminId,
+                            "Report Status Update",
+                            "Report ID PRJ-" + report.getId() + " status has been updated to: " + newStatus,
+                            "REPORT"
+                    );
+                }
+
+                // 2. 🚀 Barangay Official Notifications (Strictly curated)
+                if (report.getUser() != null) {
+                    Long brgyUserId = report.getUser().getId();
+                    String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
+
+                    if (newStatus.equalsIgnoreCase("Validated")) {
+                        notificationService.sendNotification(brgyUserId, "Report Validated", "Good news! Report #PRJ-" + report.getId() + " for " + safeRoadName + " has been validated by the CPDO.", "REPORT");
+                    }
+                    else if (newStatus.equalsIgnoreCase("Rejected")) {
+                        String reason = (adminRemarks != null && !adminRemarks.isEmpty()) ? adminRemarks : "Review remarks for details.";
+                        notificationService.sendNotification(brgyUserId, "Report Rejected", "Report #PRJ-" + report.getId() + " requires corrections. Reason: " + reason, "REPORT");
+                    }
+                    else if (newStatus.equalsIgnoreCase("In Progress")) {
+                        // 🚀 ADDED: Now notifies them when physical repairs start!
+                        notificationService.sendNotification(brgyUserId, "Repair In Progress", "The City Engineering Office (CEO) has officially started repairs on " + safeRoadName + " (ID: PRJ-" + report.getId() + ").", "REPORT");
+                    }
+                    else if (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved")) {
+                        notificationService.sendNotification(brgyUserId, "Project Officially Closed", "Success! The repair for #PRJ-" + report.getId() + " on " + safeRoadName + " has been verified and officially closed.", "REPORT");
+                    }
+                    // NOTE: "Archived" and "Dispatched to CEO" have been intentionally omitted to prevent notification spam.
+                }
+            }
             return org.springframework.http.ResponseEntity.ok("SUCCESS");
 
         }).orElse(org.springframework.http.ResponseEntity.notFound().build());
     }
 
     // ==========================================
-    // 3. UPDATE REPORT
+    // 3. UPDATE REPORT (RESUBMISSION)
     // ==========================================
     @PutMapping("/update/{id}")
     public ResponseEntity<?> updateReport(@PathVariable Long id,
@@ -150,6 +239,7 @@ public class RoadReportController {
         try {
             RoadReport existingReport = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
 
+            // (Data updates kept exactly as they were...)
             if (description != null) existingReport.setDamageDescription(description);
             if (length != null) existingReport.setLength(length);
             if (width != null) existingReport.setWidth(width);
@@ -169,14 +259,27 @@ public class RoadReportController {
             }
 
             String currentStatus = existingReport.getStatus();
+            boolean isResubmitted = false;
+
             if (currentStatus != null && currentStatus.equalsIgnoreCase("Rejected")) {
                 existingReport.setStatus("Resubmitted");
+                isResubmitted = true;
             } else {
                 existingReport.setStatus("Pending Validation");
             }
 
             existingReport.setAdminRemarks(null);
             repository.save(existingReport);
+
+            if (isResubmitted) {
+                Long adminId = getAdminId();
+                notificationService.sendNotification(
+                        adminId,
+                        "Report Resubmitted",
+                        "A previously rejected report by " + existingReport.getReportedBy() + " has been revised and resubmitted.",
+                        "REPORT"
+                );
+            }
 
             return ResponseEntity.ok().body("Report updated successfully");
 
@@ -186,7 +289,7 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 4. 🚀 UPGRADED: BATCH DISPATCH TO CEO
+    // 4. BATCH DISPATCH TO CEO
     // ==========================================
     @PutMapping("/dispatch-masterlist")
     public ResponseEntity<String> dispatchMasterlistToCEO() {
@@ -194,28 +297,16 @@ public class RoadReportController {
             List<RoadReport> allReports = repository.findAll();
             int dispatchedCount = 0;
 
-            // 🚀 SMART GROUPING: Group reports by the Official who submitted them
-            java.util.Map<com.roadwise.backend.model.User, java.util.List<RoadReport>> dispatchedByUser = new java.util.HashMap<>();
-
             for (RoadReport report : allReports) {
                 if ("Validated".equalsIgnoreCase(report.getStatus().trim())) {
                     report.setStatus("Dispatched to CEO");
                     dispatchedCount++;
-
-                    if (report.getUser() != null) {
-                        dispatchedByUser.computeIfAbsent(report.getUser(), k -> new java.util.ArrayList<>()).add(report);
-                    }
                 }
             }
 
             if (dispatchedCount > 0) {
                 repository.saveAll(allReports);
-
-                // 🚀 TRIGGER BATCH EMAILS
-                for (java.util.Map.Entry<com.roadwise.backend.model.User, java.util.List<RoadReport>> entry : dispatchedByUser.entrySet()) {
-                    sendBatchDispatchEmail(entry.getKey(), entry.getValue());
-                }
-
+                // 🚀 REMOVED: Batch Dispatch emails & notifications to keep Barangay Official's inbox spam-free!
                 return ResponseEntity.ok("Successfully dispatched " + dispatchedCount + " prioritized reports to the CEO!");
             } else {
                 return ResponseEntity.badRequest().body("No 'Validated' reports found to dispatch.");
@@ -226,7 +317,90 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 5. 🚀 CEO MARK AS COMPLETED
+    // 5B. CEO BATCH DEFER REPAIRS (PENDING BUDGET)
+    // ==========================================
+    @PostMapping("/batch/defer")
+    public ResponseEntity<?> batchDeferReports(@RequestBody java.util.Map<String, Object> payload) {
+        try {
+            String reason = (String) payload.get("repairRemarks");
+            Object idsObj = payload.get("reportIds");
+
+            if (reason == null || reason.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(java.util.Map.of("error", "Deferral reason is required."));
+            }
+            if (idsObj == null) {
+                return ResponseEntity.badRequest().body(java.util.Map.of("error", "No reports selected for deferral."));
+            }
+
+            java.util.List<Long> reportIds = new java.util.ArrayList<>();
+            if (idsObj instanceof java.util.List) {
+                for (Object id : (java.util.List<?>) idsObj) {
+                    reportIds.add(Long.valueOf(id.toString()));
+                }
+            }
+
+            if (reportIds.isEmpty()) return ResponseEntity.badRequest().body(java.util.Map.of("error", "No valid reports selected."));
+
+            List<RoadReport> reportsToDefer = repository.findAllById(reportIds);
+
+            if (reportsToDefer.isEmpty()) return ResponseEntity.status(404).body(java.util.Map.of("error", "Could not find the selected reports in the database."));
+
+            for (RoadReport r : reportsToDefer) {
+                r.setStatus("Pending Budget");
+                r.setRepairRemarks(reason);
+            }
+
+            repository.saveAll(reportsToDefer);
+
+            // ==========================================
+            // 🔔 SINGLE NOTIFICATION TRIGGER: ADMIN BUDGET ALERT
+            // ==========================================
+            Long adminId = getAdminId();
+            notificationService.sendNotification(
+                    adminId,
+                    "Batch Budget Alert",
+                    "The CEO has deferred " + reportsToDefer.size() + " selected reports due to budget constraints. Reason: " + reason,
+                    "BUDGET"
+            );
+
+            // ==========================================
+            // 📧 GROUP EMAILS & 🔔 SEND INDIVIDUAL NOTIFICATIONS
+            // ==========================================
+            java.util.Map<com.roadwise.backend.model.User, java.util.List<RoadReport>> deferredByUser = new java.util.HashMap<>();
+
+            for (RoadReport report : reportsToDefer) {
+                if (report.getUser() != null) {
+                    // Group it for the single batch email
+                    deferredByUser.computeIfAbsent(report.getUser(), k -> new java.util.ArrayList<>()).add(report);
+
+                    // 🚀 THE FIX: Fire an INDIVIDUAL Bell Notification for every single report deferred!
+                    if (report.getUser().getId() != null) {
+                        String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
+                        notificationService.sendNotification(
+                                report.getUser().getId(),
+                                "Repair Deferred (Pending Budget)",
+                                "The CEO has deferred the repair for " + safeRoadName + " (ID: PRJ-" + report.getId() + ") due to budget constraints. Reason: " + reason,
+                                "BUDGET"
+                        );
+                    }
+                }
+            }
+
+            // Send the Grouped Email (so we don't spam their inbox with 10 emails)
+            for (java.util.Map.Entry<com.roadwise.backend.model.User, java.util.List<RoadReport>> entry : deferredByUser.entrySet()) {
+                sendBatchDeferEmail(entry.getKey(), entry.getValue(), reason);
+            }
+
+            return ResponseEntity.ok().body(java.util.Map.of("message", "Successfully deferred " + reportsToDefer.size() + " selected reports."));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body(java.util.Map.of("error", "Error processing batch deferral: " + e.getMessage()));
+        }
+    }
+
+    // ==========================================
+    // 5. CEO MARK AS COMPLETED
     // ==========================================
     @PostMapping(value = "/{id}/complete", consumes = {"multipart/form-data"})
     public ResponseEntity<?> completeReport(
@@ -235,8 +409,7 @@ public class RoadReportController {
             @RequestParam(value = "proofImage", required = true) MultipartFile proofImage) {
 
         try {
-            RoadReport report = repository.findById(id)
-                    .orElseThrow(() -> new RuntimeException("Report not found"));
+            RoadReport report = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
 
             if (proofImage != null && !proofImage.isEmpty()) {
                 Path uploadPath = Paths.get(UPLOAD_DIR);
@@ -249,15 +422,20 @@ public class RoadReportController {
                 report.setProofOfRepairImage(fileName);
             }
 
-            if (repairRemarks != null) {
-                report.setRepairRemarks(repairRemarks);
-            }
+            if (repairRemarks != null) report.setRepairRemarks(repairRemarks);
 
             report.setStatus("Completed");
             repository.save(report);
 
-            // 🚀 FIRE THE AUTOMATED EMAIL HELPER
             sendStatusUpdateEmail(report, "Completed", repairRemarks);
+
+            Long adminId = getAdminId();
+            notificationService.sendNotification(
+                    adminId,
+                    "Repair Completed",
+                    "The CEO has marked Report ID " + report.getId() + " as completed and uploaded proof. Awaiting your final QA.",
+                    "REPORT"
+            );
 
             return ResponseEntity.ok().body(java.util.Map.of("message", "Project marked as Completed!"));
 
@@ -268,7 +446,50 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 6. 🚀 EMAIL HELPER: SINGLE STATUS UPDATE
+    // 5B. CEO DEFER REPAIR (SINGLE)
+    // ==========================================
+    @PutMapping("/{id}/defer")
+    public ResponseEntity<?> deferReport(@PathVariable Long id, @RequestBody java.util.Map<String, String> payload) {
+        try {
+            RoadReport report = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
+
+            String reason = payload.get("repairRemarks");
+
+            report.setRepairRemarks(reason);
+            report.setStatus("Pending Budget");
+            repository.save(report);
+
+            sendStatusUpdateEmail(report, "Pending Budget", reason);
+
+            // Notify Admin
+            Long adminId = getAdminId();
+            notificationService.sendNotification(
+                    adminId,
+                    "Budget Alert: Repair Deferred",
+                    "The CEO has deferred the repair for " + report.getCityRoadName() + " (ID: " + report.getId() + ") due to budget constraints. Reason: " + reason,
+                    "BUDGET"
+            );
+
+            // 🚀 FIXED: Notify Barangay Official
+            if (report.getUser() != null && report.getUser().getId() != null) {
+                notificationService.sendNotification(
+                        report.getUser().getId(),
+                        "Repair Deferred (Pending Budget)",
+                        "The CEO has deferred the repair for " + report.getCityRoadName() + " (ID: PRJ-" + report.getId() + ") due to budget constraints. Reason: " + reason,
+                        "BUDGET"
+                );
+            }
+
+            return ResponseEntity.ok().body(java.util.Map.of("message", "Project marked as Pending Budget. CPDO Admin notified."));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body(java.util.Map.of("error", "Error deferring repair: " + e.getMessage()));
+        }
+    }
+
+    // ==========================================
+    // 6. EMAIL HELPER: SINGLE STATUS UPDATE
     // ==========================================
     private void sendStatusUpdateEmail(RoadReport report, String newStatus, String remarks) {
         if (report.getUser() == null || report.getUser().getEmail() == null || report.getUser().getEmail().isEmpty()) {
@@ -278,9 +499,7 @@ public class RoadReportController {
         String officialEmail = report.getUser().getEmail();
         String officialName = report.getUser().getFirstName();
 
-        // 🚀 FIXED: Using getCityRoadName() and getInventoryYear()
         String trackingId = "RPT-" + report.getId() + " (Year: " + report.getInventoryYear() + ")";
-
         String subject = "RoadWise Update: Status changed to " + newStatus;
         StringBuilder body = new StringBuilder();
 
@@ -297,7 +516,8 @@ public class RoadReportController {
                 body.append("Great job! The CPDO has successfully validated your report. It is now awaiting dispatch to the CEO Priority List.\n");
                 break;
             case "in progress":
-                body.append("The City Engineering Office (CEO) is now actively working on this road repair!\n");
+                subject = "RoadWise Update: Repair In Progress";
+                body.append("The City Engineering Office (CEO) is now actively working on this road repair! Please monitor the dashboard for the completion update.\n");
                 break;
             case "pending budget":
                 subject = "RoadWise Update: Repair Deferred (Pending Budget)";
@@ -305,11 +525,19 @@ public class RoadReportController {
                 break;
             case "completed":
                 subject = "RoadWise Update: Repair Pending Admin QA";
-                body.append("The City Engineering Office (CEO) has marked this repair as completed!.\n");
+                body.append("The City Engineering Office (CEO) has marked this repair as completed! The CPDO Admin is now reviewing the final proof of repair.\n");
+                break;
+            case "closed":
+            case "resolved":
+                // 🚀 ADDED: Specific email wording for successfully closed projects
+                subject = "RoadWise Update: Project Officially Closed";
+                body.append("Success! The repair for this road has been verified and officially closed by the CPDO Admin. Thank you for keeping your barangay safe.\n");
                 break;
             default:
                 body.append("The status of your report has been updated.\n");
         }
+
+        // NOTE: "Archived" status intentionally omitted so no email is sent when Admin archives deferred projects.
 
         if (remarks != null && !remarks.trim().isEmpty()) {
             body.append("\nRemarks: ").append(remarks).append("\n");
@@ -322,26 +550,26 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 7. 🚀 EMAIL HELPER: BATCH DISPATCH LIST
+    // 7. EMAIL HELPER: BATCH DEFERRAL LIST
     // ==========================================
-    private void sendBatchDispatchEmail(com.roadwise.backend.model.User official, List<RoadReport> dispatchedReports) {
+    private void sendBatchDeferEmail(com.roadwise.backend.model.User official, List<RoadReport> deferredReports, String reason) {
         if (official.getEmail() == null || official.getEmail().isEmpty()) return;
 
-        String subject = "RoadWise: " + dispatchedReports.size() + " Reports Dispatched to CEO Priority List";
+        String subject = "RoadWise Update: " + deferredReports.size() + " Reports Deferred (Pending Budget)";
         StringBuilder body = new StringBuilder();
 
         body.append("Hello ").append(official.getFirstName()).append(",\n\n");
-        body.append("Good news! The CPDO has officially forwarded ").append(dispatchedReports.size())
-                .append(" of your validated road reports to the City Engineering Office (CEO) Priority List.\n\n");
+        body.append("The City Engineering Office (CEO) has reviewed the priority list and deferred ").append(deferredReports.size())
+                .append(" of your road reports due to budget constraints.\n\n");
 
-        body.append("Dispatched Roads:\n");
-        for (RoadReport r : dispatchedReports) {
-            // Safely fetch severity or default to "Unassigned"
-            String severity = r.getSeverity() != null ? r.getSeverity() : "Unassigned";
-            body.append("- ").append(r.getCityRoadName()).append(" (Severity: ").append(severity).append(")\n");
+        body.append("CEO Remarks: ").append(reason).append("\n\n");
+
+        body.append("Deferred Roads:\n");
+        for (RoadReport r : deferredReports) {
+            body.append("- ").append(r.getCityRoadName()).append(" (ID: RPT-").append(r.getId()).append(")\n");
         }
 
-        body.append("\nThe CEO will review this masterlist and allocate repair budgets accordingly. You will receive further updates once physical repairs begin.\n\n");
+        body.append("\nThese reports remain securely in the system for future fiscal allocation.\n\n");
         body.append("Best regards,\nRoadWise SJDM System");
 
         emailService.sendEmail(official.getEmail(), subject, body.toString());

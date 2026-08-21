@@ -1,7 +1,6 @@
 package com.roadwise.backend.model;
 
 import jakarta.persistence.*;
-
 import java.time.LocalDate;
 
 @Entity
@@ -38,42 +37,49 @@ public class RoadReport {
     private Integer inventoryYear;
     private String status;
 
-    // This holds the Admin's rejection feedback!
+    // Admin & CEO Remarks
     @Column(columnDefinition = "TEXT")
     private String adminRemarks;
 
-    // 🚀 NEW: CEO Repair Proof Tracking
     @Column(columnDefinition = "TEXT")
     private String repairRemarks;
     private String proofOfRepairImage;
 
-    // ⬇️ ADD THIS EXACT LINE TO FIX THE JSON INFINITE LOOP ⬇️
-    // Keep ONLY this relationship in your model
+    // AI Classification
+    private String cvDamageClassification;
+    private Double cvConfidenceScore;
+
+    // Relationships
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties({"reports", "hibernateLazyInitializer", "handler"})
     @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "barangay_id")
     private Barangay barangay;
 
-    // 🚀 THE FIX: Link the report to the User who submitted it!
     @ManyToOne
     @JoinColumn(name = "user_id")
     private User user;
 
     private String reportedBy;
-
     private String severity;
-    private java.time.LocalDate dateSubmitted;
 
-    // This tells Spring Boot: "Right before you save to PostgreSQL, grab today's date!"
+    // 🚀 AUTOMATIC SUBMISSION DATE
+    @Column(name = "date_submitted")
+    private LocalDate dateSubmitted;
+
+    // Sets today's date right before saving to the database
     @PrePersist
     public void prePersist() {
-        this.dateSubmitted = java.time.LocalDate.now();
+        if (this.dateSubmitted == null) {
+            this.dateSubmitted = LocalDate.now();
+        }
     }
 
-    // Empty constructor required by Spring
     public RoadReport() {
     }
 
+    // ==========================================
+    // GETTERS & SETTERS
+    // ==========================================
     public Long getId() {
         return id;
     }
@@ -202,15 +208,20 @@ public class RoadReport {
         this.status = status;
     }
 
-    private String cvDamageClassification;
-    private Double cvConfidenceScore;
-
     public String getCvDamageClassification() {
         return cvDamageClassification;
     }
 
     public void setCvDamageClassification(String cvDamageClassification) {
         this.cvDamageClassification = cvDamageClassification;
+    }
+
+    public Double getCvConfidenceScore() {
+        return cvConfidenceScore;
+    }
+
+    public void setCvConfidenceScore(Double cvConfidenceScore) {
+        this.cvConfidenceScore = cvConfidenceScore;
     }
 
     public String getRepairRemarks() {
@@ -229,14 +240,6 @@ public class RoadReport {
         this.proofOfRepairImage = proofOfRepairImage;
     }
 
-    public Double getCvConfidenceScore() {
-        return cvConfidenceScore;
-    }
-
-    public void setCvConfidenceScore(Double cvConfidenceScore) {
-        this.cvConfidenceScore = cvConfidenceScore;
-    }
-
     public Barangay getBarangay() {
         return barangay;
     }
@@ -245,7 +248,6 @@ public class RoadReport {
         this.barangay = barangay;
     }
 
-    // 🚀 THE FIX: Getters and Setters for the new User fields
     public User getUser() {
         return user;
     }
@@ -310,4 +312,3 @@ public class RoadReport {
         this.damageWidth = damageWidth;
     }
 }
-

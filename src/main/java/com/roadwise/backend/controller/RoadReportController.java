@@ -19,6 +19,8 @@ import org.springframework.http.ResponseEntity;
 @CrossOrigin(origins = "${frontend.url}")
 public class RoadReportController {
 
+
+
     @Autowired
     private RoadReportRepository repository;
 
@@ -719,6 +721,86 @@ public class RoadReportController {
             messagingTemplate.convertAndSend("/topic/updates", "REFRESH_DASHBOARDS");
         } catch (Exception e) {
             System.err.println("WebSocket Broadcast Failed: " + e.getMessage());
+        }
+    }
+
+    // ==========================================
+    // 🚀 9. ENTERPRISE ANNUAL AUDIT ROLLOVER
+    // ==========================================
+    @PostMapping("/rollover-annual-cycle")
+    public ResponseEntity<?> executeAnnualRollover() {
+        try {
+            // 1. Bulk update status in the database (Single SQL execution)
+            int archivedCount = repository.archiveAnnualCycleReports();
+
+            // 2. Fetch all system users (CPDO Admin, CEO Engineers, Barangay Officials)
+            List<com.roadwise.backend.model.User> allUsers = userRepository.findAll();
+
+            String notifTitle = "📅 Annual Road Inventory Cycle Initialized";
+            String notifMsg = "The CPDO has initialized the new annual audit cycle. Completed and validated reports have been archived. Active repairs remain in progress.";
+
+            String emailSubject = "RoadWise SJDM: New Annual Road Inventory Cycle Initialized";
+
+            // 3. Broadcast in-app bell notifications and emails to all users
+            for (com.roadwise.backend.model.User user : allUsers) {
+                // In-App Notification
+                if (user.getId() != null) {
+                    notificationService.sendNotification(user.getId(), notifTitle, notifMsg, "SYSTEM");
+                }
+
+                // Email Notification
+                if (user.getEmail() != null && !user.getEmail().trim().isEmpty()) {
+                    String personalizedBody = "Hello " + user.getFirstName() + ",\n\n" +
+                            "The City Planning and Development Office (CPDO) has officially initialized the new Annual Road Inventory cycle for San Jose Del Monte.\n\n" +
+                            "Cycle Summary:\n" +
+                            "- Past validated, rejected, and officially closed records have been archived for audit records.\n" +
+                            "- Active repair projects ('Dispatched', 'In Progress', and 'Completed Pending QA') remain active in the engineering queue.\n" +
+                            "- Barangay Officials may now conduct visual surveys and submit fresh road inspection reports.\n\n" +
+                            "Please log into your RoadWise dashboard for updated project lists.\n\n" +
+                            "Best regards,\nRoadWise CPDO Administration";
+
+                    emailService.sendEmail(user.getEmail(), emailSubject, personalizedBody);
+                }
+            }
+
+            // 4. Trigger real-time dashboard refresh across all active browser sessions
+            sendLiveUpdate();
+
+            return ResponseEntity.ok(java.util.Map.of(
+                    "message", "Successfully archived " + archivedCount + " reports and notified all users.",
+                    "archivedCount", archivedCount
+            ));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body(java.util.Map.of(
+                    "error", "Failed to complete annual rollover: " + e.getMessage()
+            ));
+        }
+    }
+
+    // ==========================================
+    // 🚀 SERVE UPLOADED IMAGES
+    // ==========================================
+    @GetMapping("/image/{filename:.+}")
+    public org.springframework.http.ResponseEntity<org.springframework.core.io.Resource> serveImage(@PathVariable String filename) {
+        try {
+            java.nio.file.Path file = java.nio.file.Paths.get("uploads").resolve(filename);
+            org.springframework.core.io.Resource resource = new org.springframework.core.io.UrlResource(file.toUri());
+
+            if (resource.exists() || resource.isReadable()) {
+                String contentType = java.nio.file.Files.probeContentType(file);
+                if (contentType == null) {
+                    contentType = "application/octet-stream";
+                }
+                return org.springframework.http.ResponseEntity.ok()
+                        .header(org.springframework.http.HttpHeaders.CONTENT_TYPE, contentType)
+                        .body(resource);
+            } else {
+                return org.springframework.http.ResponseEntity.notFound().build();
+            }
+        } catch (Exception e) {
+            return org.springframework.http.ResponseEntity.notFound().build();
         }
     }
 

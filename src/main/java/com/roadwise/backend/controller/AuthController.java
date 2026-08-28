@@ -1,7 +1,9 @@
 package com.roadwise.backend.controller;
 
 import com.roadwise.backend.model.User;
+import com.roadwise.backend.model.SystemSettings;
 import com.roadwise.backend.repository.UserRepository;
+import com.roadwise.backend.repository.SystemSettingsRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -21,6 +23,9 @@ public class AuthController {
 
     @Autowired
     private UserRepository userRepository;
+
+    @Autowired
+    private SystemSettingsRepository systemSettingsRepository;
 
     @Autowired
     private com.roadwise.backend.service.EmailService emailService;
@@ -117,6 +122,19 @@ public class AuthController {
 
         loginTracker.remove(username);
         User user = userOpt.get();
+
+        // ==========================================
+        // 🚀 NEW: SYSTEM MAINTENANCE LOCK CHECK
+        // ==========================================
+        SystemSettings settings = systemSettingsRepository.findById(1L).orElse(null);
+        if (settings != null && settings.isMaintenanceMode()) {
+            if (!user.getRole().equalsIgnoreCase("Admin") && !user.getRole().equalsIgnoreCase("CPDO Admin")) {
+                return ResponseEntity.status(403).body(Map.of(
+                        "error", "System is currently down for maintenance and updates. Please try again later.",
+                        "type", "MAINTENANCE_MODE"
+                ));
+            }
+        }
 
         if ("Suspended".equalsIgnoreCase(user.getStatus())) {
             return ResponseEntity.status(403).body(Map.of("error", "Your account is currently Suspended. Please contact the CPDO."));

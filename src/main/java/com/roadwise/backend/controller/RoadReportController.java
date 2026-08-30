@@ -1,8 +1,22 @@
 package com.roadwise.backend.controller;
 
+import com.roadwise.backend.model.Barangay;
 import com.roadwise.backend.model.RoadReport;
+import com.roadwise.backend.model.User;
+import com.roadwise.backend.repository.BarangayRepository;
 import com.roadwise.backend.repository.RoadReportRepository;
+import com.roadwise.backend.repository.UserRepository;
+import com.roadwise.backend.service.ActivityLogService;
+import com.roadwise.backend.service.EmailService;
+import com.roadwise.backend.service.NotificationService;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
+import org.springframework.data.domain.Sort;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseEntity;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -10,36 +24,34 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.List;
-import java.util.UUID;
-import org.springframework.http.ResponseEntity;
+import java.util.*;
 
 @RestController
 @RequestMapping("/api/reports")
 @CrossOrigin(origins = "${frontend.url}")
 public class RoadReportController {
 
-
-
     @Autowired
     private RoadReportRepository repository;
 
     @Autowired
-    private com.roadwise.backend.repository.BarangayRepository barangayRepository;
+    private BarangayRepository barangayRepository;
 
     @Autowired
-    private com.roadwise.backend.repository.UserRepository userRepository;
+    private UserRepository userRepository;
 
     @Autowired
-    private com.roadwise.backend.service.EmailService emailService;
-
-    // 🚀 INJECTED NOTIFICATION SERVICE
-    @Autowired
-    private com.roadwise.backend.service.NotificationService notificationService;
+    private EmailService emailService;
 
     @Autowired
-    private org.springframework.messaging.simp.SimpMessagingTemplate messagingTemplate;
+    private NotificationService notificationService;
 
+    // 🚀 INJECTED ACTIVITY LOG AUDIT SERVICE
+    @Autowired
+    private ActivityLogService activityLogService;
+
+    @Autowired
+    private SimpMessagingTemplate messagingTemplate;
 
     private static final String UPLOAD_DIR = "uploads/";
 
@@ -49,9 +61,9 @@ public class RoadReportController {
     private Long getAdminId() {
         return userRepository.findAll().stream()
                 .filter(user -> user.getRole() != null && (user.getRole().equalsIgnoreCase("CPDO Admin") || user.getRole().equalsIgnoreCase("Admin")))
-                .map(user -> user.getId())
+                .map(User::getId)
                 .findFirst()
-                .orElse(1L); // Fallback to 1 if no admin is found
+                .orElse(1L);
     }
 
     // ==========================================
@@ -61,29 +73,45 @@ public class RoadReportController {
         return userRepository.findAll().stream()
                 .filter(user -> user.getRole() != null &&
                         (user.getRole().equalsIgnoreCase("ENGINEER") || user.getRole().equalsIgnoreCase("City Engineer")))
-                .map(user -> user.getId())
+                .map(User::getId)
                 .findFirst()
-                .orElse(null); // Returns null if no CEO exists yet
+                .orElse(null);
     }
 
     // ==========================================
-    // 1. CREATE REPORT
+    // 🚀 HELPER: HYBRID ACTOR RESOLVER
+    // ==========================================
+    private User resolveActor(Long explicitUserId, Long fallbackRoleId) {
+        if (explicitUserId != null) {
+            Optional<User> u = userRepository.findById(explicitUserId);
+            if (u.isPresent()) return u.get();
+        }
+        if (fallbackRoleId != null) {
+            return userRepository.findById(fallbackRoleId).orElse(null);
+        }
+        return null;
+    }
+
+    // ==========================================
+    // 1. CREATE REPORT (BARANGAY OFFICIAL)
     // ==========================================
     @PostMapping(consumes = {"multipart/form-data"})
     public RoadReport createReport(
             @ModelAttribute RoadReport report,
             @RequestParam(value = "barangayId", required = false) Long barangayId,
             @RequestParam(value = "userId", required = false) Long userId,
-            @RequestParam(value = "imageFile", required = false) MultipartFile imageFile) {
+            @RequestParam(value = "imageFile", required = false) MultipartFile imageFile,
+            HttpServletRequest request) {
 
         try {
+            User foundUser = null;
             if (barangayId != null) {
-                com.roadwise.backend.model.Barangay foundBarangay = barangayRepository.findById(barangayId).orElse(null);
+                Barangay foundBarangay = barangayRepository.findById(barangayId).orElse(null);
                 report.setBarangay(foundBarangay);
             }
 
             if (userId != null) {
-                com.roadwise.backend.model.User foundUser = userRepository.findById(userId).orElse(null);
+                foundUser = userRepository.findById(userId).orElse(null);
                 report.setUser(foundUser);
                 if (foundUser != null) {
                     report.setReportedBy(foundUser.getFirstName() + " " + foundUser.getLastName());
@@ -110,12 +138,8 @@ public class RoadReportController {
             // Save the report first to get the ID
             RoadReport savedReport = repository.save(report);
 
-            // ==========================================
-            // 🔔 SMART NOTIFICATION TRIGGER: ADMIN & BARANGAY
-            // ==========================================
+            // 🔔 SMART NOTIFICATIONS
             Long adminId = getAdminId();
-
-            // 1. Notify the Admin
             if (savedReport.getSeverity() != null && savedReport.getSeverity().equalsIgnoreCase("High")) {
                 notificationService.sendNotification(
                         adminId,
@@ -132,7 +156,6 @@ public class RoadReportController {
                 );
             }
 
-            // 2. Notify the Barangay Official (Submitter)
             if (savedReport.getUser() != null) {
                 notificationService.sendNotification(
                         savedReport.getUser().getId(),
@@ -142,7 +165,17 @@ public class RoadReportController {
                 );
             }
 
-            // 🚀 THE REAL FIX: Broadcast MUST happen here, AFTER notifications are saved!
+            // ⏱️ AUDIT LOG: NEW REPORT SUBMITTED (Attributed to submitter)
+            activityLogService.log(
+                    foundUser,
+                    "PROJECT",
+                    "REPORT_SUBMITTED",
+                    "#PRJ-" + String.format("%04d", savedReport.getId()),
+                    "Road damage report submitted for '" + savedReport.getCityRoadName() + "' (" + (savedReport.getDamageType() != null ? savedReport.getDamageType() : "Damage") + ").",
+                    "SUCCESS",
+                    request
+            );
+
             sendLiveUpdate();
             return savedReport;
 
@@ -154,35 +187,38 @@ public class RoadReportController {
 
     @GetMapping
     public List<RoadReport> getAllReports() {
-        return repository.findAll(org.springframework.data.domain.Sort.by(org.springframework.data.domain.Sort.Direction.DESC, "id"));
+        return repository.findAll(Sort.by(Sort.Direction.DESC, "id"));
     }
 
     @GetMapping("/{id}")
-    public org.springframework.http.ResponseEntity<RoadReport> getReportById(@PathVariable Long id) {
+    public ResponseEntity<RoadReport> getReportById(@PathVariable Long id) {
         return repository.findById(id)
-                .map(org.springframework.http.ResponseEntity::ok)
-                .orElse(org.springframework.http.ResponseEntity.notFound().build());
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
     }
 
     @GetMapping("/barangay/{barangayId}")
-    public java.util.List<RoadReport> getReportsByBarangay(@PathVariable Long barangayId) {
-        java.util.List<RoadReport> reports = repository.findByBarangay_Id(barangayId);
+    public List<RoadReport> getReportsByBarangay(@PathVariable Long barangayId) {
+        List<RoadReport> reports = repository.findByBarangay_Id(barangayId);
         reports.sort((a, b) -> b.getId().compareTo(a.getId()));
         return reports;
     }
 
     // ==========================================
-    // 2. 🚀 THE EMAIL SWITCHBOARD (STATUS UPDATES)
+    // 2. THE EMAIL SWITCHBOARD & STATUS UPDATES (CPDO / CEO)
     // ==========================================
     @PutMapping("/{id}/status")
-    public org.springframework.http.ResponseEntity<String> updateReportStatus(
+    public ResponseEntity<String> updateReportStatus(
             @PathVariable Long id,
-            @RequestBody java.util.Map<String, String> payload) {
+            @RequestBody Map<String, String> payload,
+            HttpServletRequest request) {
 
         return repository.findById(id).map(report -> {
 
             String newStatus = payload.get("status");
             String adminRemarks = payload.get("adminRemarks");
+            String passedUserIdStr = payload.get("userId");
+            Long explicitUserId = passedUserIdStr != null ? Long.valueOf(passedUserIdStr) : null;
 
             if (newStatus != null) {
                 report.setStatus(newStatus);
@@ -194,17 +230,13 @@ public class RoadReportController {
 
             repository.save(report);
 
-            // 🚀 FIRE THE AUTOMATED EMAIL HELPER
             sendStatusUpdateEmail(report, newStatus, adminRemarks);
 
-            // ==========================================
-            // 🔔 NOTIFICATION TRIGGER: STATUS UPDATES
-            // ==========================================
-            if (newStatus != null) {
-                Long adminId = getAdminId();
-                Long ceoId = getCeoId(); // 🚀 FETCH CEO ID
+            Long adminId = getAdminId();
+            Long ceoId = getCeoId();
 
-                // 1. Admin Notifications (Only if CEO updates it naturally, NOT if Admin is doing a rework)
+            // 🔔 NOTIFICATION TRIGGERS
+            if (newStatus != null) {
                 if (newStatus.equalsIgnoreCase("Completed") || (newStatus.equalsIgnoreCase("In Progress") && (adminRemarks == null || adminRemarks.trim().isEmpty()))) {
                     notificationService.sendNotification(
                             adminId,
@@ -214,10 +246,8 @@ public class RoadReportController {
                     );
                 }
 
-                // 🚀 NEW 2. CEO Notification & Email (If Admin requests a REWORK)
                 if (newStatus.equalsIgnoreCase("In Progress") && adminRemarks != null && !adminRemarks.trim().isEmpty()) {
                     if (ceoId != null) {
-                        // 1. Send the Bell Notification
                         notificationService.sendNotification(
                                 ceoId,
                                 "Repair Rework Required",
@@ -225,7 +255,6 @@ public class RoadReportController {
                                 "REPORT"
                         );
 
-                        // 2. 🚀 THE FIX: Send the Email to the CEO
                         userRepository.findById(ceoId).ifPresent(ceo -> {
                             if (ceo.getEmail() != null && !ceo.getEmail().isEmpty()) {
                                 String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
@@ -241,39 +270,72 @@ public class RoadReportController {
                     }
                 }
 
-                // 3. Barangay Official Notifications (Strictly curated)
                 if (report.getUser() != null) {
                     Long brgyUserId = report.getUser().getId();
                     String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
 
                     if (newStatus.equalsIgnoreCase("Validated")) {
                         notificationService.sendNotification(brgyUserId, "Report Validated", "Good news! Report #PRJ-" + report.getId() + " for " + safeRoadName + " has been validated by the CPDO.", "REPORT");
-                    }
-                    else if (newStatus.equalsIgnoreCase("Rejected")) {
+                    } else if (newStatus.equalsIgnoreCase("Rejected")) {
                         String reason = (adminRemarks != null && !adminRemarks.isEmpty()) ? adminRemarks : "Review remarks for details.";
                         notificationService.sendNotification(brgyUserId, "Report Rejected", "Report #PRJ-" + report.getId() + " requires corrections. Reason: " + reason, "REPORT");
-                    }
-                    else if (newStatus.equalsIgnoreCase("In Progress")) {
+                    } else if (newStatus.equalsIgnoreCase("In Progress")) {
                         notificationService.sendNotification(brgyUserId, "Repair In Progress", "The City Engineering Office (CEO) is actively working on " + safeRoadName + " (ID: PRJ-" + report.getId() + ").", "REPORT");
-                    }
-                    else if (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved")) {
+                    } else if (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved")) {
                         notificationService.sendNotification(brgyUserId, "Project Officially Closed", "Success! The repair for #PRJ-" + report.getId() + " on " + safeRoadName + " has been verified and officially closed.", "REPORT");
                     }
                 }
             }
 
-            // 🚀 THE REAL FIX: Broadcast MUST happen here, AFTER notifications are saved!
-            sendLiveUpdate();
-            return org.springframework.http.ResponseEntity.ok("SUCCESS");
+            // ⏱️ RESOLVE ACTOR & LOG ACTION (Hybrid Resolution)
+            User actor;
+            String logCategory = "PROJECT";
+            String logAction = "STATUS_UPDATED_" + (newStatus != null ? newStatus.toUpperCase().replace(" ", "_") : "UNKNOWN");
+            String logDesc = "Project status transitioned to '" + newStatus + "' on " + report.getCityRoadName() + "." +
+                    (adminRemarks != null && !adminRemarks.trim().isEmpty() ? " Remarks: " + adminRemarks : "");
 
-        }).orElse(org.springframework.http.ResponseEntity.notFound().build());
+            if (newStatus != null && (newStatus.equalsIgnoreCase("Validated") || newStatus.equalsIgnoreCase("Rejected"))) {
+                logCategory = "QA";
+                logAction = newStatus.equalsIgnoreCase("Validated") ? "REPORT_VALIDATED" : "REPORT_REJECTED";
+                actor = resolveActor(explicitUserId, adminId); // Attributed to CPDO Admin
+            } else if (newStatus != null && newStatus.equalsIgnoreCase("In Progress") && adminRemarks != null && !adminRemarks.trim().isEmpty()) {
+                logCategory = "QA";
+                logAction = "REPAIR_REWORK_REQUESTED";
+                actor = resolveActor(explicitUserId, adminId); // Attributed to CPDO Admin
+            } else if (newStatus != null && (newStatus.equalsIgnoreCase("In Progress") || newStatus.equalsIgnoreCase("Completed"))) {
+                logCategory = "PROJECT";
+                logAction = newStatus.equalsIgnoreCase("In Progress") ? "REPAIR_IN_PROGRESS" : "REPAIR_COMPLETED";
+                actor = resolveActor(explicitUserId, ceoId); // Attributed to CEO Engineer
+            } else if (newStatus != null && (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved"))) {
+                logCategory = "QA";
+                logAction = "PROJECT_OFFICIALLY_CLOSED";
+                actor = resolveActor(explicitUserId, adminId); // Attributed to CPDO Admin
+            } else {
+                actor = resolveActor(explicitUserId, adminId);
+            }
+
+            activityLogService.log(
+                    actor,
+                    logCategory,
+                    logAction,
+                    "#PRJ-" + String.format("%04d", report.getId()),
+                    logDesc,
+                    "SUCCESS",
+                    request
+            );
+
+            sendLiveUpdate();
+            return ResponseEntity.ok("SUCCESS");
+
+        }).orElse(ResponseEntity.notFound().build());
     }
 
     // ==========================================
-    // 3. UPDATE REPORT (RESUBMISSION)
+    // 3. UPDATE REPORT (RESUBMISSION BY OFFICIAL)
     // ==========================================
     @PutMapping("/update/{id}")
     public ResponseEntity<?> updateReport(@PathVariable Long id,
+                                          @RequestParam(value = "userId", required = false) Long userId,
                                           @RequestParam(value = "damageDescription", required = false) String description,
                                           @RequestParam(value = "length", required = false) Double length,
                                           @RequestParam(value = "width", required = false) Double width,
@@ -284,11 +346,11 @@ public class RoadReportController {
                                           @RequestParam(value = "damageType", required = false) String damageType,
                                           @RequestParam(value = "damageLength", required = false) Double damageLength,
                                           @RequestParam(value = "damageWidth", required = false) Double damageWidth,
-                                          @RequestParam(value = "imageFile", required = false) org.springframework.web.multipart.MultipartFile imageFile) {
+                                          @RequestParam(value = "imageFile", required = false) MultipartFile imageFile,
+                                          HttpServletRequest request) {
         try {
             RoadReport existingReport = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
 
-            // (Data updates kept exactly as they were...)
             if (description != null) existingReport.setDamageDescription(description);
             if (length != null) existingReport.setLength(length);
             if (width != null) existingReport.setWidth(width);
@@ -301,9 +363,9 @@ public class RoadReportController {
             if (damageWidth != null) existingReport.setDamageWidth(damageWidth);
 
             if (imageFile != null && !imageFile.isEmpty()) {
-                String fileName = java.util.UUID.randomUUID().toString() + "_" + imageFile.getOriginalFilename();
-                java.nio.file.Path filePath = java.nio.file.Paths.get("uploads", fileName);
-                java.nio.file.Files.copy(imageFile.getInputStream(), filePath);
+                String fileName = UUID.randomUUID().toString() + "_" + imageFile.getOriginalFilename();
+                Path filePath = Paths.get("uploads", fileName);
+                Files.copy(imageFile.getInputStream(), filePath);
                 existingReport.setDamageImage(fileName);
             }
 
@@ -330,7 +392,18 @@ public class RoadReportController {
                 );
             }
 
-            // 🚀 THE REAL FIX: Broadcast MUST happen here!
+            // ⏱️ AUDIT LOG: Attributed to Barangay Submitter
+            User actor = (userId != null) ? userRepository.findById(userId).orElse(existingReport.getUser()) : existingReport.getUser();
+            activityLogService.log(
+                    actor,
+                    "PROJECT",
+                    isResubmitted ? "REPORT_RESUBMITTED" : "REPORT_UPDATED",
+                    "#PRJ-" + String.format("%04d", existingReport.getId()),
+                    "Report details and measurements updated for " + existingReport.getCityRoadName() + ".",
+                    "SUCCESS",
+                    request
+            );
+
             sendLiveUpdate();
             return ResponseEntity.ok().body("Report updated successfully");
 
@@ -340,10 +413,12 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 4. BATCH DISPATCH TO CEO
+    // 4. BATCH DISPATCH TO CEO (CPDO ADMIN)
     // ==========================================
     @PutMapping("/dispatch-masterlist")
-    public ResponseEntity<String> dispatchMasterlistToCEO() {
+    public ResponseEntity<String> dispatchMasterlistToCEO(
+            @RequestParam(value = "userId", required = false) Long userId,
+            HttpServletRequest request) {
         try {
             List<RoadReport> allReports = repository.findAll();
             int dispatchedCount = 0;
@@ -358,15 +433,10 @@ public class RoadReportController {
             if (dispatchedCount > 0) {
                 repository.saveAll(allReports);
 
-                // 🚀 THE FIX: We capture the final count into a new final variable for the lambda
                 final int finalDispatchedCount = dispatchedCount;
 
-                // ==========================================
-                // 🔔 & 📧 NEW: NOTIFY AND EMAIL THE CEO
-                // ==========================================
                 Long ceoId = getCeoId();
                 if (ceoId != null) {
-                    // 1. Send the Bell Notification
                     notificationService.sendNotification(
                             ceoId,
                             "Masterlist Dispatched",
@@ -374,7 +444,6 @@ public class RoadReportController {
                             "REPORT"
                     );
 
-                    // 2. 🚀 Send the Email to the CEO
                     userRepository.findById(ceoId).ifPresent(ceo -> {
                         if (ceo.getEmail() != null && !ceo.getEmail().isEmpty()) {
                             String subject = "RoadWise: Masterlist Dispatched";
@@ -386,9 +455,19 @@ public class RoadReportController {
                         }
                     });
                 }
-                // ==========================================
 
-                // 🚀 THE REAL FIX: Broadcast MUST happen here!
+                // ⏱️ AUDIT LOG: Attributed to CPDO Admin
+                User adminActor = resolveActor(userId, getAdminId());
+                activityLogService.log(
+                        adminActor,
+                        "PROJECT",
+                        "MASTERLIST_DISPATCHED",
+                        "CEO_PRIORITY_QUEUE",
+                        "CPDO dispatched " + finalDispatchedCount + " validated road reports to the CEO engineering priority queue.",
+                        "SUCCESS",
+                        request
+                );
+
                 sendLiveUpdate();
                 return ResponseEntity.ok("Successfully dispatched " + finalDispatchedCount + " prioritized reports to the CEO!");
             } else {
@@ -403,30 +482,31 @@ public class RoadReportController {
     // 5B. CEO BATCH DEFER REPAIRS (PENDING BUDGET)
     // ==========================================
     @PostMapping("/batch/defer")
-    public ResponseEntity<?> batchDeferReports(@RequestBody java.util.Map<String, Object> payload) {
+    public ResponseEntity<?> batchDeferReports(@RequestBody Map<String, Object> payload, HttpServletRequest request) {
         try {
             String reason = (String) payload.get("repairRemarks");
             Object idsObj = payload.get("reportIds");
+            Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
 
             if (reason == null || reason.trim().isEmpty()) {
-                return ResponseEntity.badRequest().body(java.util.Map.of("error", "Deferral reason is required."));
+                return ResponseEntity.badRequest().body(Map.of("error", "Deferral reason is required."));
             }
             if (idsObj == null) {
-                return ResponseEntity.badRequest().body(java.util.Map.of("error", "No reports selected for deferral."));
+                return ResponseEntity.badRequest().body(Map.of("error", "No reports selected for deferral."));
             }
 
-            java.util.List<Long> reportIds = new java.util.ArrayList<>();
-            if (idsObj instanceof java.util.List) {
-                for (Object id : (java.util.List<?>) idsObj) {
+            List<Long> reportIds = new ArrayList<>();
+            if (idsObj instanceof List) {
+                for (Object id : (List<?>) idsObj) {
                     reportIds.add(Long.valueOf(id.toString()));
                 }
             }
 
-            if (reportIds.isEmpty()) return ResponseEntity.badRequest().body(java.util.Map.of("error", "No valid reports selected."));
+            if (reportIds.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "No valid reports selected."));
 
             List<RoadReport> reportsToDefer = repository.findAllById(reportIds);
 
-            if (reportsToDefer.isEmpty()) return ResponseEntity.status(404).body(java.util.Map.of("error", "Could not find the selected reports in the database."));
+            if (reportsToDefer.isEmpty()) return ResponseEntity.status(404).body(Map.of("error", "Could not find the selected reports in the database."));
 
             for (RoadReport r : reportsToDefer) {
                 r.setStatus("Pending Budget");
@@ -435,9 +515,6 @@ public class RoadReportController {
 
             repository.saveAll(reportsToDefer);
 
-            // ==========================================
-            // 🔔 SINGLE NOTIFICATION TRIGGER: ADMIN BUDGET ALERT
-            // ==========================================
             Long adminId = getAdminId();
             notificationService.sendNotification(
                     adminId,
@@ -446,17 +523,12 @@ public class RoadReportController {
                     "BUDGET"
             );
 
-            // ==========================================
-            // 📧 GROUP EMAILS & 🔔 SEND INDIVIDUAL NOTIFICATIONS
-            // ==========================================
-            java.util.Map<com.roadwise.backend.model.User, java.util.List<RoadReport>> deferredByUser = new java.util.HashMap<>();
+            Map<User, List<RoadReport>> deferredByUser = new HashMap<>();
 
             for (RoadReport report : reportsToDefer) {
                 if (report.getUser() != null) {
-                    // Group it for the single batch email
-                    deferredByUser.computeIfAbsent(report.getUser(), k -> new java.util.ArrayList<>()).add(report);
+                    deferredByUser.computeIfAbsent(report.getUser(), k -> new ArrayList<>()).add(report);
 
-                    // 🚀 THE FIX: Fire an INDIVIDUAL Bell Notification for every single report deferred!
                     if (report.getUser().getId() != null) {
                         String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
                         notificationService.sendNotification(
@@ -469,29 +541,41 @@ public class RoadReportController {
                 }
             }
 
-            // Send the Grouped Email (so we don't spam their inbox with 10 emails)
-            for (java.util.Map.Entry<com.roadwise.backend.model.User, java.util.List<RoadReport>> entry : deferredByUser.entrySet()) {
+            for (Map.Entry<User, List<RoadReport>> entry : deferredByUser.entrySet()) {
                 sendBatchDeferEmail(entry.getKey(), entry.getValue(), reason);
             }
 
-            // 🚀 THE REAL FIX: Broadcast MUST happen here!
+            // ⏱️ AUDIT LOG: Attributed to CEO Engineer
+            User ceoActor = resolveActor(explicitUserId, getCeoId());
+            activityLogService.log(
+                    ceoActor,
+                    "PROJECT",
+                    "REPAIRS_BATCH_DEFERRED",
+                    "BATCH_DEFERRAL",
+                    "CEO deferred " + reportsToDefer.size() + " reports to Pending Budget. Reason: " + reason,
+                    "SUCCESS",
+                    request
+            );
+
             sendLiveUpdate();
-            return ResponseEntity.ok().body(java.util.Map.of("message", "Successfully deferred " + reportsToDefer.size() + " selected reports."));
+            return ResponseEntity.ok().body(Map.of("message", "Successfully deferred " + reportsToDefer.size() + " selected reports."));
 
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.status(500).body(java.util.Map.of("error", "Error processing batch deferral: " + e.getMessage()));
+            return ResponseEntity.status(500).body(Map.of("error", "Error processing batch deferral: " + e.getMessage()));
         }
     }
 
     // ==========================================
-    // 5. CEO MARK AS COMPLETED
+    // 5. CEO MARK AS COMPLETED (WITH PROOF)
     // ==========================================
     @PostMapping(value = "/{id}/complete", consumes = {"multipart/form-data"})
     public ResponseEntity<?> completeReport(
             @PathVariable Long id,
+            @RequestParam(value = "userId", required = false) Long userId,
             @RequestParam(value = "repairRemarks", required = false) String repairRemarks,
-            @RequestParam(value = "proofImage", required = true) MultipartFile proofImage) {
+            @RequestParam(value = "proofImage", required = true) MultipartFile proofImage,
+            HttpServletRequest request) {
 
         try {
             RoadReport report = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
@@ -522,13 +606,24 @@ public class RoadReportController {
                     "REPORT"
             );
 
-            // 🚀 THE REAL FIX: Broadcast MUST happen here!
+            // ⏱️ AUDIT LOG: Attributed to CEO Engineer
+            User ceoActor = resolveActor(userId, getCeoId());
+            activityLogService.log(
+                    ceoActor,
+                    "PROJECT",
+                    "REPAIR_COMPLETED",
+                    "#PRJ-" + String.format("%04d", report.getId()),
+                    "CEO marked project as Completed and submitted proof of repair." + (repairRemarks != null ? " Remarks: " + repairRemarks : ""),
+                    "SUCCESS",
+                    request
+            );
+
             sendLiveUpdate();
-            return ResponseEntity.ok().body(java.util.Map.of("message", "Project marked as Completed!"));
+            return ResponseEntity.ok().body(Map.of("message", "Project marked as Completed!"));
 
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.status(500).body(java.util.Map.of("error", "Error completing repair: " + e.getMessage()));
+            return ResponseEntity.status(500).body(Map.of("error", "Error completing repair: " + e.getMessage()));
         }
     }
 
@@ -536,11 +631,16 @@ public class RoadReportController {
     // 5B. CEO DEFER REPAIR (SINGLE)
     // ==========================================
     @PutMapping("/{id}/defer")
-    public ResponseEntity<?> deferReport(@PathVariable Long id, @RequestBody java.util.Map<String, String> payload) {
+    public ResponseEntity<?> deferReport(
+            @PathVariable Long id,
+            @RequestBody Map<String, String> payload,
+            HttpServletRequest request) {
         try {
             RoadReport report = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
 
             String reason = payload.get("repairRemarks");
+            String passedUserIdStr = payload.get("userId");
+            Long explicitUserId = passedUserIdStr != null ? Long.valueOf(passedUserIdStr) : null;
 
             report.setRepairRemarks(reason);
             report.setStatus("Pending Budget");
@@ -548,7 +648,6 @@ public class RoadReportController {
 
             sendStatusUpdateEmail(report, "Pending Budget", reason);
 
-            // Notify Admin
             Long adminId = getAdminId();
             notificationService.sendNotification(
                     adminId,
@@ -557,7 +656,6 @@ public class RoadReportController {
                     "BUDGET"
             );
 
-            // 🚀 FIXED: Notify Barangay Official
             if (report.getUser() != null && report.getUser().getId() != null) {
                 notificationService.sendNotification(
                         report.getUser().getId(),
@@ -567,13 +665,24 @@ public class RoadReportController {
                 );
             }
 
-            // 🚀 THE REAL FIX: Broadcast MUST happen here!
+            // ⏱️ AUDIT LOG: Attributed to CEO Engineer
+            User ceoActor = resolveActor(explicitUserId, getCeoId());
+            activityLogService.log(
+                    ceoActor,
+                    "PROJECT",
+                    "REPAIR_DEFERRED",
+                    "#PRJ-" + String.format("%04d", report.getId()),
+                    "Repair deferred by CEO to Pending Budget. Reason: " + reason,
+                    "SUCCESS",
+                    request
+            );
+
             sendLiveUpdate();
-            return ResponseEntity.ok().body(java.util.Map.of("message", "Project marked as Pending Budget. CPDO Admin notified."));
+            return ResponseEntity.ok().body(Map.of("message", "Project marked as Pending Budget. CPDO Admin notified."));
 
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.status(500).body(java.util.Map.of("error", "Error deferring repair: " + e.getMessage()));
+            return ResponseEntity.status(500).body(Map.of("error", "Error deferring repair: " + e.getMessage()));
         }
     }
 
@@ -618,15 +727,12 @@ public class RoadReportController {
                 break;
             case "closed":
             case "resolved":
-                // 🚀 ADDED: Specific email wording for successfully closed projects
                 subject = "RoadWise Update: Project Officially Closed";
                 body.append("Success! The repair for this road has been verified and officially closed by the CPDO Admin. Thank you for keeping your barangay safe.\n");
                 break;
             default:
                 body.append("The status of your report has been updated.\n");
         }
-
-        // NOTE: "Archived" status intentionally omitted so no email is sent when Admin archives deferred projects.
 
         if (remarks != null && !remarks.trim().isEmpty()) {
             body.append("\nRemarks: ").append(remarks).append("\n");
@@ -641,7 +747,7 @@ public class RoadReportController {
     // ==========================================
     // 7. EMAIL HELPER: BATCH DEFERRAL LIST
     // ==========================================
-    private void sendBatchDeferEmail(com.roadwise.backend.model.User official, List<RoadReport> deferredReports, String reason) {
+    private void sendBatchDeferEmail(User official, List<RoadReport> deferredReports, String reason) {
         if (official.getEmail() == null || official.getEmail().isEmpty()) return;
 
         String subject = "RoadWise Update: " + deferredReports.size() + " Reports Deferred (Pending Budget)";
@@ -665,34 +771,35 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 8. 🚀 ADMIN BATCH ARCHIVE (SILENT HOUSEKEEPING)
+    // 8. ADMIN BATCH ARCHIVE (SILENT HOUSEKEEPING)
     // ==========================================
     @PostMapping("/batch/archive")
-    public ResponseEntity<?> batchArchiveReports(@RequestBody java.util.Map<String, Object> payload) {
+    public ResponseEntity<?> batchArchiveReports(
+            @RequestBody Map<String, Object> payload,
+            HttpServletRequest request) {
         try {
             Object idsObj = payload.get("reportIds");
+            Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
 
             if (idsObj == null) {
-                return ResponseEntity.badRequest().body(java.util.Map.of("error", "No reports selected for archiving."));
+                return ResponseEntity.badRequest().body(Map.of("error", "No reports selected for archiving."));
             }
 
-            // Safely convert JSON payload into Long IDs
-            java.util.List<Long> reportIds = new java.util.ArrayList<>();
-            if (idsObj instanceof java.util.List) {
-                for (Object id : (java.util.List<?>) idsObj) {
+            List<Long> reportIds = new ArrayList<>();
+            if (idsObj instanceof List) {
+                for (Object id : (List<?>) idsObj) {
                     reportIds.add(Long.valueOf(id.toString()));
                 }
             }
 
-            if (reportIds.isEmpty()) return ResponseEntity.badRequest().body(java.util.Map.of("error", "No valid reports selected."));
+            if (reportIds.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "No valid reports selected."));
 
             List<RoadReport> reportsToArchive = repository.findAllById(reportIds);
 
-            if (reportsToArchive.isEmpty()) return ResponseEntity.status(404).body(java.util.Map.of("error", "Could not find the selected reports in the database."));
+            if (reportsToArchive.isEmpty()) return ResponseEntity.status(404).body(Map.of("error", "Could not find the selected reports in the database."));
 
             int archivedCount = 0;
             for (RoadReport r : reportsToArchive) {
-                // Safety Check: Only allow archiving if the project is actually 'Pending Budget'
                 if ("Pending Budget".equalsIgnoreCase(r.getStatus())) {
                     r.setStatus("Archived");
                     archivedCount++;
@@ -701,14 +808,25 @@ public class RoadReportController {
 
             repository.saveAll(reportsToArchive);
 
-            // 🚀 Notice: Absolutely NO email or notification triggers here. 100% silent!
+            // ⏱️ AUDIT LOG: Attributed to CPDO Admin
+            User adminActor = resolveActor(explicitUserId, getAdminId());
+            activityLogService.log(
+                    adminActor,
+                    "PROJECT",
+                    "BATCH_ARCHIVED",
+                    "ARCHIVE_POOL",
+                    "CPDO Admin archived " + archivedCount + " deferred project reports.",
+                    "SUCCESS",
+                    request
+            );
+
             sendLiveUpdate();
 
-            return ResponseEntity.ok().body(java.util.Map.of("message", "Successfully archived " + archivedCount + " deferred reports."));
+            return ResponseEntity.ok().body(Map.of("message", "Successfully archived " + archivedCount + " deferred reports."));
 
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.status(500).body(java.util.Map.of("error", "Error processing batch archive: " + e.getMessage()));
+            return ResponseEntity.status(500).body(Map.of("error", "Error processing batch archive: " + e.getMessage()));
         }
     }
 
@@ -717,7 +835,6 @@ public class RoadReportController {
     // ==========================================
     private void sendLiveUpdate() {
         try {
-            // Sends a tiny invisible "REFRESH" pulse to all connected users
             messagingTemplate.convertAndSend("/topic/updates", "REFRESH_DASHBOARDS");
         } catch (Exception e) {
             System.err.println("WebSocket Broadcast Failed: " + e.getMessage());
@@ -725,30 +842,27 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 🚀 9. ENTERPRISE ANNUAL AUDIT ROLLOVER
+    // 9. ENTERPRISE ANNUAL AUDIT ROLLOVER
     // ==========================================
     @PostMapping("/rollover-annual-cycle")
-    public ResponseEntity<?> executeAnnualRollover() {
+    public ResponseEntity<?> executeAnnualRollover(
+            @RequestParam(value = "userId", required = false) Long userId,
+            HttpServletRequest request) {
         try {
-            // 1. Bulk update status in the database (Single SQL execution)
             int archivedCount = repository.archiveAnnualCycleReports();
 
-            // 2. Fetch all system users (CPDO Admin, CEO Engineers, Barangay Officials)
-            List<com.roadwise.backend.model.User> allUsers = userRepository.findAll();
+            List<User> allUsers = userRepository.findAll();
 
             String notifTitle = "📅 Annual Road Inventory Cycle Initialized";
             String notifMsg = "The CPDO has initialized the new annual audit cycle. Completed and validated reports have been archived. Active repairs remain in progress.";
 
             String emailSubject = "RoadWise SJDM: New Annual Road Inventory Cycle Initialized";
 
-            // 3. Broadcast in-app bell notifications and emails to all users
-            for (com.roadwise.backend.model.User user : allUsers) {
-                // In-App Notification
+            for (User user : allUsers) {
                 if (user.getId() != null) {
                     notificationService.sendNotification(user.getId(), notifTitle, notifMsg, "SYSTEM");
                 }
 
-                // Email Notification
                 if (user.getEmail() != null && !user.getEmail().trim().isEmpty()) {
                     String personalizedBody = "Hello " + user.getFirstName() + ",\n\n" +
                             "The City Planning and Development Office (CPDO) has officially initialized the new Annual Road Inventory cycle for San Jose Del Monte.\n\n" +
@@ -763,45 +877,55 @@ public class RoadReportController {
                 }
             }
 
-            // 4. Trigger real-time dashboard refresh across all active browser sessions
+            // ⏱️ AUDIT LOG: Attributed to CPDO Admin
+            User adminActor = resolveActor(userId, getAdminId());
+            activityLogService.log(
+                    adminActor,
+                    "SYSTEM",
+                    "ANNUAL_ROLLOVER_EXECUTED",
+                    "ANNUAL_CYCLE",
+                    "CPDO Admin initialized annual rollover cycle. Archived " + archivedCount + " reports across the city database.",
+                    "SUCCESS",
+                    request
+            );
+
             sendLiveUpdate();
 
-            return ResponseEntity.ok(java.util.Map.of(
+            return ResponseEntity.ok(Map.of(
                     "message", "Successfully archived " + archivedCount + " reports and notified all users.",
                     "archivedCount", archivedCount
             ));
 
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.status(500).body(java.util.Map.of(
+            return ResponseEntity.status(500).body(Map.of(
                     "error", "Failed to complete annual rollover: " + e.getMessage()
             ));
         }
     }
 
     // ==========================================
-    // 🚀 SERVE UPLOADED IMAGES
+    // SERVE UPLOADED IMAGES
     // ==========================================
     @GetMapping("/image/{filename:.+}")
-    public org.springframework.http.ResponseEntity<org.springframework.core.io.Resource> serveImage(@PathVariable String filename) {
+    public ResponseEntity<Resource> serveImage(@PathVariable String filename) {
         try {
-            java.nio.file.Path file = java.nio.file.Paths.get("uploads").resolve(filename);
-            org.springframework.core.io.Resource resource = new org.springframework.core.io.UrlResource(file.toUri());
+            Path file = Paths.get("uploads").resolve(filename);
+            Resource resource = new UrlResource(file.toUri());
 
             if (resource.exists() || resource.isReadable()) {
-                String contentType = java.nio.file.Files.probeContentType(file);
+                String contentType = Files.probeContentType(file);
                 if (contentType == null) {
                     contentType = "application/octet-stream";
                 }
-                return org.springframework.http.ResponseEntity.ok()
-                        .header(org.springframework.http.HttpHeaders.CONTENT_TYPE, contentType)
+                return ResponseEntity.ok()
+                        .header(HttpHeaders.CONTENT_TYPE, contentType)
                         .body(resource);
             } else {
-                return org.springframework.http.ResponseEntity.notFound().build();
+                return ResponseEntity.notFound().build();
             }
         } catch (Exception e) {
-            return org.springframework.http.ResponseEntity.notFound().build();
+            return ResponseEntity.notFound().build();
         }
     }
-
 }

@@ -1,7 +1,12 @@
 package com.roadwise.backend.controller;
 
 import com.roadwise.backend.model.User;
+import com.roadwise.backend.repository.BarangayRepository;
 import com.roadwise.backend.repository.UserRepository;
+import com.roadwise.backend.service.ActivityLogService;
+import com.roadwise.backend.service.EmailService;
+import com.roadwise.backend.service.NotificationService;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -11,11 +16,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.time.LocalDate;
-import java.util.Map;
-import java.util.Optional;
-import java.util.UUID;
-import java.util.List;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 @RestController
 @RequestMapping("/api/users")
@@ -26,22 +31,40 @@ public class UserController {
     private UserRepository userRepository;
 
     @Autowired
-    private com.roadwise.backend.service.EmailService emailService;
+    private EmailService emailService;
 
     @Autowired
-    private com.roadwise.backend.repository.BarangayRepository barangayRepository;
+    private BarangayRepository barangayRepository;
 
-    // 🚀 1. BRING IN THE NOTIFICATION SERVICE (THE "POST OFFICE")
     @Autowired
-    private com.roadwise.backend.service.NotificationService notificationService;
+    private NotificationService notificationService;
+
+    // 🚀 INJECTED ACTIVITY LOG AUDIT SERVICE
+    @Autowired
+    private ActivityLogService activityLogService;
 
     private static final String UPLOAD_DIR = "uploads/";
+
+    // ==========================================
+    // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
+    // ==========================================
+    private Long getAdminId() {
+        return userRepository.findAll().stream()
+                .filter(user -> user.getRole() != null && (user.getRole().equalsIgnoreCase("CPDO Admin") || user.getRole().equalsIgnoreCase("Admin")))
+                .map(User::getId)
+                .findFirst()
+                .orElse(1L);
+    }
 
     // ==========================================
     // 1. UPDATE TEXT PROFILE DETAILS
     // ==========================================
     @PutMapping("/{id}/profile")
-    public ResponseEntity<?> updateProfile(@PathVariable Long id, @RequestBody Map<String, String> updates) {
+    public ResponseEntity<?> updateProfile(
+            @PathVariable Long id,
+            @RequestBody Map<String, String> updates,
+            HttpServletRequest request) {
+
         Optional<User> userOpt = userRepository.findById(id);
         if (userOpt.isEmpty()) {
             return ResponseEntity.notFound().build();
@@ -57,6 +80,18 @@ public class UserController {
         }
 
         userRepository.save(user);
+
+        // ⏱️ AUDIT LOG: PROFILE UPDATE
+        activityLogService.log(
+                user,
+                "USER",
+                "USER_PROFILE_UPDATED",
+                "#USR-" + user.getId(),
+                "Updated personal profile information (contact/demographics).",
+                "SUCCESS",
+                request
+        );
+
         return ResponseEntity.ok(Map.of("message", "Profile updated successfully"));
     }
 
@@ -66,7 +101,8 @@ public class UserController {
     @PostMapping(value = "/{id}/profile-picture", consumes = {"multipart/form-data"})
     public ResponseEntity<?> uploadProfilePicture(
             @PathVariable Long id,
-            @RequestParam("profilePicture") MultipartFile file) {
+            @RequestParam("profilePicture") MultipartFile file,
+            HttpServletRequest request) {
         try {
             Optional<User> userOpt = userRepository.findById(id);
             if (userOpt.isEmpty()) return ResponseEntity.notFound().build();
@@ -81,6 +117,17 @@ public class UserController {
 
             user.setProfilePicture(uniqueFilename);
             userRepository.save(user);
+
+            // ⏱️ AUDIT LOG: AVATAR CHANGE
+            activityLogService.log(
+                    user,
+                    "USER",
+                    "USER_AVATAR_UPDATED",
+                    "#USR-" + user.getId(),
+                    "Updated account profile picture.",
+                    "SUCCESS",
+                    request
+            );
 
             return ResponseEntity.ok(Map.of(
                     "message", "Profile picture updated successfully!",
@@ -97,13 +144,17 @@ public class UserController {
     // ==========================================
     private static class AttemptTracker {
         int attempts = 0;
-        java.time.LocalDateTime lockoutTime = null;
+        LocalDateTime lockoutTime = null;
     }
 
-    private static final java.util.Map<Long, AttemptTracker> securityTracker = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Map<Long, AttemptTracker> securityTracker = new ConcurrentHashMap<>();
 
     @PutMapping("/{id}/password")
-    public ResponseEntity<?> updatePassword(@PathVariable Long id, @RequestBody Map<String, String> payload) {
+    public ResponseEntity<?> updatePassword(
+            @PathVariable Long id,
+            @RequestBody Map<String, String> payload,
+            HttpServletRequest request) {
+
         Optional<User> userOpt = userRepository.findById(id);
         if (userOpt.isEmpty()) return ResponseEntity.notFound().build();
 
@@ -114,7 +165,7 @@ public class UserController {
         AttemptTracker tracker = securityTracker.computeIfAbsent(id, k -> new AttemptTracker());
 
         if (tracker.attempts >= 5 && tracker.lockoutTime != null) {
-            java.time.Duration duration = java.time.Duration.between(tracker.lockoutTime, java.time.LocalDateTime.now());
+            Duration duration = Duration.between(tracker.lockoutTime, LocalDateTime.now());
             if (duration.toMinutes() < 60) {
                 long minutesLeft = 60 - duration.toMinutes();
                 return ResponseEntity.status(429).body(Map.of("error", "Security lockout active. Please try again in " + minutesLeft + " minute(s)."));
@@ -127,7 +178,19 @@ public class UserController {
         if (!user.getPassword().equals(currentPassword)) {
             tracker.attempts++;
             if (tracker.attempts >= 5) {
-                tracker.lockoutTime = java.time.LocalDateTime.now();
+                tracker.lockoutTime = LocalDateTime.now();
+
+                // ⏱️ AUDIT LOG: PASSWORD LOCKOUT
+                activityLogService.log(
+                        user,
+                        "AUTH",
+                        "PASSWORD_CHANGE_LOCKED",
+                        "#USR-" + user.getId(),
+                        "Password update locked for 1 hour due to multiple incorrect password attempts.",
+                        "WARNING",
+                        request
+                );
+
                 return ResponseEntity.status(429).body(Map.of("error", "Maximum attempts reached! Account locked for 1 hour for security."));
             }
             int remaining = 5 - tracker.attempts;
@@ -137,6 +200,17 @@ public class UserController {
         securityTracker.remove(id);
         user.setPassword(newPassword);
         userRepository.save(user);
+
+        // ⏱️ AUDIT LOG: PASSWORD UPDATE SUCCESS
+        activityLogService.log(
+                user,
+                "AUTH",
+                "USER_PASSWORD_UPDATED",
+                "#USR-" + user.getId(),
+                "User successfully changed account password.",
+                "SUCCESS",
+                request
+        );
 
         return ResponseEntity.ok(Map.of("message", "Password updated successfully!"));
     }
@@ -151,10 +225,13 @@ public class UserController {
     }
 
     // ==========================================
-    // 5. PROVISION NEW BARANGAY OFFICIAL ACCOUNT
+    // 5. PROVISION NEW BARANGAY OFFICIAL ACCOUNT (ADMIN)
     // ==========================================
     @PostMapping("/register")
-    public ResponseEntity<?> registerOfficial(@RequestBody Map<String, String> payload) {
+    public ResponseEntity<?> registerOfficial(
+            @RequestBody Map<String, String> payload,
+            HttpServletRequest request) {
+
         String username = payload.get("username");
         if (userRepository.findByUsername(username).isPresent()) {
             return ResponseEntity.status(400).body(Map.of("error", "Username already exists!"));
@@ -170,17 +247,28 @@ public class UserController {
         newUser.setRole(payload.get("role"));
         newUser.setStatus("Active");
 
+        // 🛡️ 1-OFFICIAL-PER-BARANGAY VALIDATION
         if (payload.get("barangayId") != null && !payload.get("barangayId").isEmpty()) {
             Long brgyId = Long.parseLong(payload.get("barangayId"));
+            List<User> existingOfficials = userRepository.findByBarangayId(brgyId);
+
+            // Check if another active/suspended official already occupies this barangay
+            Optional<User> activeOfficial = existingOfficials.stream()
+                    .filter(u -> u.getStatus() == null || !u.getStatus().equalsIgnoreCase("Deactivated"))
+                    .findFirst();
+
+            if (activeOfficial.isPresent()) {
+                User occupiedBy = activeOfficial.get();
+                return ResponseEntity.status(400).body(Map.of("error",
+                        "This Barangay already has an assigned official (" + occupiedBy.getFirstName() + " " + occupiedBy.getLastName() + "). Only 1 official is allowed per Barangay."));
+            }
+
             barangayRepository.findById(brgyId).ifPresent(newUser::setBarangay);
         }
 
-        // Save and store the generated user object to capture the ID
         User savedUser = userRepository.save(newUser);
 
-        // ==========================================
-        // 🔔 2. TRIGGER REAL IN-APP NOTIFICATION!
-        // ==========================================
+        // 🔔 NOTIFICATION TRIGGER
         notificationService.sendNotification(
                 savedUser.getId(),
                 "Account Provisioned",
@@ -188,7 +276,7 @@ public class UserController {
                 "ACCOUNT"
         );
 
-        // 🚀 EMAIL TRIGGER: Sends welcome credentials WITH the Vercel Link
+        // 🚀 EMAIL TRIGGER
         if (savedUser.getEmail() != null && !savedUser.getEmail().isEmpty()) {
             String subject = "Welcome to RoadWise - Your Account Credentials";
             String emailBody = "Hello " + savedUser.getFirstName() + ",\n\n" +
@@ -201,6 +289,22 @@ public class UserController {
 
             emailService.sendEmail(savedUser.getEmail(), subject, emailBody);
         }
+
+        // ⏱️ AUDIT LOG: Attributed to Admin
+        String adminIdStr = payload.get("adminId");
+        Long adminId = (adminIdStr != null && !adminIdStr.isEmpty()) ? Long.valueOf(adminIdStr) : getAdminId();
+        User adminActor = userRepository.findById(adminId).orElse(null);
+
+        String brgyName = savedUser.getBarangay() != null ? savedUser.getBarangay().getBarangayName() : "City Central";
+        activityLogService.log(
+                adminActor,
+                "USER",
+                "USER_PROVISIONED",
+                "#USR-" + savedUser.getId(),
+                "Provisioned new " + savedUser.getRole() + " account for " + savedUser.getFirstName() + " " + savedUser.getLastName() + " (Assigned: " + brgyName + ").",
+                "SUCCESS",
+                request
+        );
 
         return ResponseEntity.ok(Map.of("message", "Official successfully provisioned!"));
     }
@@ -219,7 +323,11 @@ public class UserController {
     // 7. ADMIN: UPDATE OFFICIAL RECORD & STATUS
     // ==========================================
     @PutMapping("/{id}/manage")
-    public ResponseEntity<?> manageUserRecord(@PathVariable Long id, @RequestBody Map<String, String> updates) {
+    public ResponseEntity<?> manageUserRecord(
+            @PathVariable Long id,
+            @RequestBody Map<String, String> updates,
+            HttpServletRequest request) {
+
         Optional<User> userOpt = userRepository.findById(id);
         if (userOpt.isEmpty()) {
             return ResponseEntity.notFound().build();
@@ -231,13 +339,12 @@ public class UserController {
         user.setLastName(updates.get("lastName"));
         user.setEmail(updates.get("email"));
 
-        // Optional Status change
-        if (updates.containsKey("status")) {
-            String oldStatus = user.getStatus();
-            String newStatus = updates.get("status");
+        String oldStatus = user.getStatus();
+        String newStatus = updates.get("status");
+
+        if (newStatus != null && !newStatus.isEmpty()) {
             user.setStatus(newStatus);
 
-            // 🔔 BONUS: Trigger an alert if Admin changes their account status!
             if (oldStatus != null && !oldStatus.equals(newStatus)) {
                 notificationService.sendNotification(
                         user.getId(),
@@ -248,12 +355,43 @@ public class UserController {
             }
         }
 
+        // 🛡️ 1-OFFICIAL-PER-BARANGAY VALIDATION ON REASSIGNMENT
         if (updates.get("barangayId") != null && !updates.get("barangayId").isEmpty()) {
             Long brgyId = Long.parseLong(updates.get("barangayId"));
+            List<User> existingOfficials = userRepository.findByBarangayId(brgyId);
+
+            // Check if ANOTHER user (not the one being edited) already actively occupies this barangay
+            Optional<User> conflictOfficial = existingOfficials.stream()
+                    .filter(u -> !u.getId().equals(id) && (u.getStatus() == null || !u.getStatus().equalsIgnoreCase("Deactivated")))
+                    .findFirst();
+
+            if (conflictOfficial.isPresent()) {
+                User occupiedBy = conflictOfficial.get();
+                return ResponseEntity.status(400).body(Map.of("error",
+                        "Cannot reassign: This Barangay is already assigned to " + occupiedBy.getFirstName() + " " + occupiedBy.getLastName() + "."));
+            }
+
             barangayRepository.findById(brgyId).ifPresent(user::setBarangay);
         }
 
         userRepository.save(user);
+
+        // ⏱️ AUDIT LOG: Attributed to Admin
+        String adminIdStr = updates.get("adminId");
+        Long adminId = (adminIdStr != null && !adminIdStr.isEmpty()) ? Long.valueOf(adminIdStr) : getAdminId();
+        User adminActor = userRepository.findById(adminId).orElse(null);
+
+        String statusNotice = (newStatus != null && !newStatus.equalsIgnoreCase(oldStatus)) ? " Status changed to '" + newStatus + "'." : "";
+        activityLogService.log(
+                adminActor,
+                "USER",
+                "USER_RECORD_MANAGED",
+                "#USR-" + user.getId(),
+                "Updated official profile/jurisdiction for " + user.getFirstName() + " " + user.getLastName() + "." + statusNotice,
+                "SUCCESS",
+                request
+        );
+
         return ResponseEntity.ok(Map.of("message", "Official record updated successfully!"));
     }
 
@@ -261,7 +399,11 @@ public class UserController {
     // 8. 🚨 ADMIN: EMERGENCY PASSWORD RESET
     // ==========================================
     @PutMapping("/{id}/emergency-reset")
-    public ResponseEntity<?> emergencyPasswordReset(@PathVariable Long id) {
+    public ResponseEntity<?> emergencyPasswordReset(
+            @PathVariable Long id,
+            @RequestBody(required = false) Map<String, String> payload,
+            HttpServletRequest request) {
+
         Optional<User> userOpt = userRepository.findById(id);
         if (userOpt.isEmpty()) {
             return ResponseEntity.notFound().build();
@@ -271,12 +413,26 @@ public class UserController {
         user.setPassword("RoadWise2026!");
         userRepository.save(user);
 
-        // 🔔 NOTIFICATION TRIGGER: Let the official know their password was reset
         notificationService.sendNotification(
                 user.getId(),
                 "Security Alert",
                 "Your password has been reset by the City Administrator. Please update it immediately.",
                 "SECURITY"
+        );
+
+        // ⏱️ AUDIT LOG: Attributed to Admin
+        String adminIdStr = (payload != null) ? payload.get("adminId") : null;
+        Long adminId = (adminIdStr != null && !adminIdStr.isEmpty()) ? Long.valueOf(adminIdStr) : getAdminId();
+        User adminActor = userRepository.findById(adminId).orElse(null);
+
+        activityLogService.log(
+                adminActor,
+                "AUTH",
+                "ADMIN_EMERGENCY_PASSWORD_RESET",
+                "#USR-" + user.getId(),
+                "Admin performed emergency default password reset for " + user.getFirstName() + " " + user.getLastName() + ".",
+                "WARNING",
+                request
         );
 
         return ResponseEntity.ok(Map.of("message", "Password successfully reset to default."));

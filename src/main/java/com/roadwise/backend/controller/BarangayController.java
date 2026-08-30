@@ -7,6 +7,8 @@ import com.roadwise.backend.repository.BarangayRepository;
 import com.roadwise.backend.repository.CityRoadRepository;
 import com.roadwise.backend.repository.RoadReportRepository;
 import com.roadwise.backend.repository.UserRepository;
+import com.roadwise.backend.service.ActivityLogService;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -31,27 +33,56 @@ public class BarangayController {
     @Autowired
     private RoadReportRepository roadReportRepository;
 
-    // 🚀 NEW: We need this to get the Official's name from the User table!
     @Autowired
     private UserRepository userRepository;
+
+    // 🚀 INJECTED ACTIVITY LOG AUDIT SERVICE
+    @Autowired
+    private ActivityLogService activityLogService;
+
+    // ==========================================
+    // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
+    // ==========================================
+    private Long getAdminId() {
+        return userRepository.findAll().stream()
+                .filter(user -> user.getRole() != null && (user.getRole().equalsIgnoreCase("CPDO Admin") || user.getRole().equalsIgnoreCase("Admin")))
+                .map(User::getId)
+                .findFirst()
+                .orElse(1L);
+    }
 
     // ==========================================
     // 1. ADD NEW BARANGAY (WITH VALIDATION)
     // ==========================================
     @PostMapping
-    public ResponseEntity<?> createBarangay(@RequestBody Barangay barangay) {
-        // Clean the input (removes accidental spaces at the beginning or end)
+    public ResponseEntity<?> createBarangay(
+            @RequestBody Barangay barangay,
+            @RequestParam(value = "userId", required = false) Long userId,
+            HttpServletRequest request) {
+
         String cleanedName = barangay.getBarangayName().trim();
 
-        // 🚀 VALIDATION: Check if it already exists in the database
         if (barangayRepository.existsByBarangayNameIgnoreCase(cleanedName)) {
-            // Return an HTTP 400 Bad Request with our custom error message
             return ResponseEntity.badRequest().body("A Barangay named '" + cleanedName + "' already exists in the system.");
         }
 
-        // If it passes the check, save it!
         barangay.setBarangayName(cleanedName);
         Barangay savedBarangay = barangayRepository.save(barangay);
+
+        // ⏱️ AUDIT LOG: Attributed to Admin
+        Long adminId = (userId != null) ? userId : getAdminId();
+        User adminActor = userRepository.findById(adminId).orElse(null);
+
+        activityLogService.log(
+                adminActor,
+                "USER",
+                "BARANGAY_CREATED",
+                "#BRGY-" + savedBarangay.getId(),
+                "Registered new Barangay territorial unit: '" + cleanedName + "'.",
+                "SUCCESS",
+                request
+        );
+
         return ResponseEntity.ok(savedBarangay);
     }
 
@@ -62,7 +93,7 @@ public class BarangayController {
     }
 
     // ==========================================
-    // 🚀 THE FIX: FETCH SPECIFIC BARANGAY DETAILS & ATTACH USER INFO
+    // FETCH SPECIFIC BARANGAY DETAILS & ATTACH USER INFO
     // ==========================================
     @GetMapping("/{id}")
     public ResponseEntity<Barangay> getBarangayById(@PathVariable Long id) {
@@ -71,11 +102,9 @@ public class BarangayController {
         if (brgyOpt.isPresent()) {
             Barangay brgy = brgyOpt.get();
 
-            // Search the users table for whoever is assigned to this Barangay
             List<User> officials = userRepository.findByBarangayId(id);
 
             if (!officials.isEmpty()) {
-                // If we found an official, temporarily attach their User details to the Barangay object for the frontend!
                 User official = officials.get(0);
                 brgy.setBrgyCaptain(official.getFirstName() + " " + official.getLastName());
                 brgy.setContactNumber(official.getPhoneNumber());
@@ -92,7 +121,7 @@ public class BarangayController {
     }
 
     // ==========================================
-    // 🚀 THE FIX: SMART DASHBOARD SUMMARY (WITH USER INFO)
+    // DASHBOARD SUMMARY (WITH USER INFO)
     // ==========================================
     @GetMapping("/dashboard-summary")
     public ResponseEntity<List<Map<String, Object>>> getDashboardSummary() {
@@ -104,7 +133,6 @@ public class BarangayController {
             map.put("id", brgy.getId());
             map.put("name", brgy.getBarangayName());
 
-            // Search for the Official in the User table
             List<User> officials = userRepository.findByBarangayId(brgy.getId());
             if (!officials.isEmpty()) {
                 User official = officials.get(0);
@@ -113,11 +141,9 @@ public class BarangayController {
                 map.put("contactName", "Unassigned");
             }
 
-            // Count Registered Roads
             int roadCount = cityRoadRepository.findByBarangayId(brgy.getId()).size();
             map.put("roadCount", roadCount);
 
-            // Count Active Reports
             List<RoadReport> reports = roadReportRepository.findByBarangay_Id(brgy.getId());
             long activeCount = 0;
             for (RoadReport r : reports) {
@@ -138,7 +164,12 @@ public class BarangayController {
     // UPDATE / RENAME A BARANGAY
     // ==========================================
     @PutMapping("/{id}")
-    public ResponseEntity<?> updateBarangay(@PathVariable Long id, @RequestBody Barangay updatedInfo) {
+    public ResponseEntity<?> updateBarangay(
+            @PathVariable Long id,
+            @RequestBody Barangay updatedInfo,
+            @RequestParam(value = "userId", required = false) Long userId,
+            HttpServletRequest request) {
+
         Optional<Barangay> existingOpt = barangayRepository.findById(id);
         if (existingOpt.isEmpty()) {
             return ResponseEntity.notFound().build();
@@ -147,14 +178,26 @@ public class BarangayController {
         Barangay existingBarangay = existingOpt.get();
         String cleanedName = updatedInfo.getBarangayName().trim();
 
-        // Check if ANOTHER barangay already has this exact name
         if (barangayRepository.existsByBarangayNameIgnoreCaseAndIdNot(cleanedName, id)) {
             return ResponseEntity.badRequest().body("A Barangay named '" + cleanedName + "' already exists.");
         }
 
-        // Apply changes and save
         existingBarangay.setBarangayName(cleanedName);
         Barangay savedBarangay = barangayRepository.save(existingBarangay);
+
+        // ⏱️ AUDIT LOG: Attributed to Admin
+        Long adminId = (userId != null) ? userId : getAdminId();
+        User adminActor = userRepository.findById(adminId).orElse(null);
+
+        activityLogService.log(
+                adminActor,
+                "USER",
+                "BARANGAY_UPDATED",
+                "#BRGY-" + savedBarangay.getId(),
+                "Updated Barangay territorial details/name to '" + cleanedName + "'.",
+                "SUCCESS",
+                request
+        );
 
         return ResponseEntity.ok(savedBarangay);
     }

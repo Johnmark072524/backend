@@ -216,6 +216,15 @@ public class UserController {
     }
 
     // ==========================================
+    // 🚀 0. GET ALL SYSTEM USERS (Fixes the 404 Error)
+    // ==========================================
+    @GetMapping
+    public ResponseEntity<List<User>> getAllUsers() {
+        List<User> users = userRepository.findAll();
+        return ResponseEntity.ok(users);
+    }
+
+    // ==========================================
     // 4. FETCH ALL BARANGAY OFFICIALS (For Admin)
     // ==========================================
     @GetMapping("/officials")

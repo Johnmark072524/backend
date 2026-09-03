@@ -28,22 +28,15 @@ public class WebConfig implements WebMvcConfigurer {
     public CorsFilter corsFilter() {
         CorsConfiguration config = new CorsConfiguration();
         config.setAllowCredentials(true);
-        config.setAllowedOrigins(Arrays.asList(
-                "http://localhost:63342",
-                "http://127.0.0.1:63342",
-                "http://localhost:5500",
-                "http://127.0.0.1:5500",
-                "http://localhost:3000",
-                "http://127.0.0.1:3000",
-                "https://frontend-capstone-fawn.vercel.app",
-                "https://frontend-capstone-7zkx2srtu-team-ratbu.vercel.app",
-                "https://vitamins-april-unify.ngrok-free.dev"
-        ));
+
+        // Use patterns to allow all origins safely
+        config.setAllowedOriginPatterns(Arrays.asList("*"));
+
         config.setAllowedHeaders(Arrays.asList("*"));
         config.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS"));
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/**", config); // 👈 Fixed method name
+        source.registerCorsConfiguration("/**", config);
         return new CorsFilter(source);
     }
 }

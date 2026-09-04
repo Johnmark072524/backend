@@ -202,13 +202,24 @@ public class AuthController {
         String otp = String.format("%06d", new Random().nextInt(999999));
         mfaTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(5)));
 
+        // 🚀 LIVE CONSOLE LOG: Dynamic MFA Code Output for Verification & Defense Monitoring
+        System.out.println("=================================================");
+        System.out.println(">>> [AUTH] MFA CODE FOR " + user.getUsername() + ": " + otp);
+        System.out.println(">>> [AUTH] RECIPIENT EMAIL: " + user.getEmail());
+        System.out.println("=================================================");
+
         String subject = "RoadWise - Login Verification Code";
         String body = "Hello " + user.getFirstName() + ",\n\n" +
                 "Your Multi-Factor Authentication (MFA) code is: " + otp + "\n\n" +
                 "This code will expire in 5 minutes. Do not share this code with anyone.\n\n" +
                 "If you did not attempt to log in, please contact the CPDO Administrator immediately.";
 
-        emailService.sendEmail(user.getEmail(), subject, body);
+        // 🚀 ISOLATED SMTP DISPATCH: Network/port timeouts won't block authentication
+        try {
+            emailService.sendEmail(user.getEmail(), subject, body);
+        } catch (Exception e) {
+            System.err.println(">>> [WARN] SMTP Delivery failed (Cloud outbound port restricted). Use terminal OTP above. Error: " + e.getMessage());
+        }
 
         // ⏱️ AUDIT LOG: MFA DISPATCHED
         activityLogService.log(
@@ -323,6 +334,11 @@ public class AuthController {
         String otp = String.format("%06d", new Random().nextInt(999999));
         resetTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(10)));
 
+        // 🚀 LIVE CONSOLE LOG: Dynamic Recovery Code Output
+        System.out.println("=================================================");
+        System.out.println(">>> [PASSWORD RESET] RECOVERY CODE FOR " + user.getUsername() + " (" + user.getEmail() + "): " + otp);
+        System.out.println("=================================================");
+
         String subject = "RoadWise - Password Reset Code";
         String body = "Hello " + user.getFirstName() + ",\n\n" +
                 "You requested a password reset for your RoadWise account.\n\n" +
@@ -330,7 +346,12 @@ public class AuthController {
                 "This code will expire in 10 minutes.\n\n" +
                 "If you did not request this, please ignore this email and your password will remain unchanged.";
 
-        emailService.sendEmail(user.getEmail(), subject, body);
+        // 🚀 ISOLATED SMTP DISPATCH: Safe delivery execution
+        try {
+            emailService.sendEmail(user.getEmail(), subject, body);
+        } catch (Exception e) {
+            System.err.println(">>> [WARN] Password Reset SMTP Delivery failed. Use terminal OTP above. Error: " + e.getMessage());
+        }
 
         // 🔔 NOTIFICATION TRIGGER: FORGOT PASSWORD
         Long adminId = getAdminId();

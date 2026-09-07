@@ -62,15 +62,18 @@ public class RoadReport {
     private String reportedBy;
     private String severity;
 
-    // 🚀 AUTOMATIC SUBMISSION DATE
+    // 🚀 AUTOMATIC SUBMISSION DATE & INVENTORY YEAR
     @Column(name = "date_submitted")
     private LocalDate dateSubmitted;
 
-    // Sets today's date right before saving to the database
+    // Sets today's date and the active fiscal cycle year before saving
     @PrePersist
     public void prePersist() {
         if (this.dateSubmitted == null) {
             this.dateSubmitted = LocalDate.now();
+        }
+        if (this.inventoryYear == null) {
+            this.inventoryYear = LocalDate.now().getYear();
         }
     }
 

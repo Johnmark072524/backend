@@ -21,7 +21,7 @@ public class EmailService {
     @Value("${brevo.sender.email:csjdmroadwise@gmail.com}")
     private String senderEmail;
 
-    @Value("${brevo.sender.name:RoadWise System}")
+    @Value("${brevo.sender.name:RoadWise CSJDM}")
     private String senderName;
 
     private final RestTemplate restTemplate = new RestTemplate();

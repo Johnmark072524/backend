@@ -18,7 +18,6 @@ import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.time.LocalDateTime;
-import java.time.Duration;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -37,7 +36,6 @@ public class AuthController {
     @Autowired
     private NotificationService notificationService;
 
-    // 🚀 INJECTED ACTIVITY LOG AUDIT SERVICE
     @Autowired
     private ActivityLogService activityLogService;
 
@@ -53,13 +51,12 @@ public class AuthController {
     }
 
     // ==========================================
-    // 1. SMART LOGIN TRACKER (BRUTE-FORCE PROTECTION)
+    // 1. IN-MEMORY THROTTLE (FOR UNKNOWN USERS ONLY)
     // ==========================================
     private static class LoginAttemptTracker {
         int attempts = 0;
         LocalDateTime lockoutTime = null;
     }
-
     private static final Map<String, LoginAttemptTracker> loginTracker = new ConcurrentHashMap<>();
 
     // ==========================================
@@ -74,123 +71,111 @@ public class AuthController {
             this.expiryTime = expiryTime;
         }
     }
-
     private static final Map<Long, MfaSession> mfaTracker = new ConcurrentHashMap<>();
     private static final Map<Long, MfaSession> resetTracker = new ConcurrentHashMap<>();
 
     // ==========================================
-    // 3. STEP 1: CREDENTIALS & OTP GENERATION
+    // 3. CREDENTIALS & PROGRESSIVE LOCKOUT
     // ==========================================
     @PostMapping("/login")
     public ResponseEntity<?> login(@RequestBody Map<String, String> credentials, HttpServletRequest request) {
         String username = credentials.get("username");
         String password = credentials.get("password");
 
-        LoginAttemptTracker tracker = loginTracker.computeIfAbsent(username, k -> new LoginAttemptTracker());
-
-        if (tracker.attempts >= 5 && tracker.lockoutTime != null) {
-            Duration duration = Duration.between(tracker.lockoutTime, LocalDateTime.now());
-            if (duration.toMinutes() < 60) {
-                long minutesLeft = 60 - duration.toMinutes();
-                return ResponseEntity.status(429).body(Map.of("error", "Account locked due to multiple failed logins. Try again in " + minutesLeft + " minute(s)."));
-            } else {
-                tracker.attempts = 0;
-                tracker.lockoutTime = null;
-            }
+        // 🛡️ OOM Memory Leak Protection
+        if (loginTracker.size() > 2000) {
+            loginTracker.clear();
         }
 
-        Optional<User> userOpt = userRepository.findByUsername(username);
+        // Searches by Username first. If not found, searches by Email.
+        Optional<User> userOpt = userRepository.findByUsername(username)
+                .or(() -> userRepository.findByEmail(username));
 
-        if (userOpt.isEmpty() || !userOpt.get().getPassword().equals(password)) {
+        // ==========================================
+        // BRANCH A: USER DOES NOT EXIST
+        // ==========================================
+        if (userOpt.isEmpty()) {
+            LoginAttemptTracker tracker = loginTracker.computeIfAbsent(username, k -> new LoginAttemptTracker());
+
+            if (tracker.lockoutTime != null && LocalDateTime.now().isBefore(tracker.lockoutTime)) {
+                return ResponseEntity.status(429).body(Map.of("error", "Too many attempts. Account temporarily rate-limited for security."));
+            }
+
             tracker.attempts++;
-            if (tracker.attempts >= 5) {
-                tracker.lockoutTime = LocalDateTime.now();
-
-                // 🔔 NOTIFICATION TRIGGER: BRUTE-FORCE LOGIN
-                Long adminId = getAdminId();
-                notificationService.sendNotification(
-                        adminId,
-                        "Security Alert: Account Locked",
-                        "Multiple failed login attempts detected for username: '" + username + "'. Account has been temporarily locked for 1 hour.",
-                        "SECURITY"
-                );
-
-                // ⏱️ AUDIT LOG: ACCOUNT LOCKED
-                activityLogService.log(
-                        null,
-                        "AUTH",
-                        "AUTH_ACCOUNT_LOCKED",
-                        username,
-                        "Multiple failed login attempts detected for '" + username + "'. Account temporarily locked for 1 hour.",
-                        "WARNING",
-                        request
-                );
-
-                return ResponseEntity.status(429).body(Map.of("error", "Maximum attempts reached! Account locked for 1 hour for security."));
+            if (tracker.attempts > 5) {
+                long penalty = Math.min((long) Math.pow(2, tracker.attempts - 5), 900); // 15 Min Cap
+                tracker.lockoutTime = LocalDateTime.now().plusSeconds(penalty);
             }
 
-            int remaining = 5 - tracker.attempts;
-
-            // ⏱️ AUDIT LOG: FAILED LOGIN
-            activityLogService.log(
-                    null,
-                    "AUTH",
-                    "AUTH_LOGIN_FAILED",
-                    username,
-                    "Failed login attempt for username: '" + username + "'. " + remaining + " attempt(s) remaining.",
-                    "FAILED",
-                    request
-            );
-
-            return ResponseEntity.status(401).body(Map.of("error", "Invalid credentials. " + remaining + " attempt(s) remaining."));
+            activityLogService.log(null, "AUTH", "AUTH_LOGIN_FAILED", username, "Failed login attempt for unknown username: '" + username + "'", "FAILED", request);
+            return ResponseEntity.status(401).body(Map.of("error", "Invalid username or password."));
         }
 
-        loginTracker.remove(username);
+        // ==========================================
+        // BRANCH B: USER EXISTS
+        // ==========================================
         User user = userOpt.get();
+        String formattedUserId = String.format("#USR-%04d", user.getId());
 
-        // SYSTEM MAINTENANCE CHECK
+        // 1. Penalty Window Check
+        if (user.getLockoutUntil() != null && LocalDateTime.now().isBefore(user.getLockoutUntil())) {
+            activityLogService.log(null, "AUTH", "AUTH_ACCOUNT_LOCKED", formattedUserId, "Blocked login attempt for '" + username + "' during active progressive lockout penalty.", "WARNING", request);
+            return ResponseEntity.status(429).body(Map.of("error", "Too many failed attempts. Account temporarily rate-limited for security."));
+        }
+
+        // 2. Verify Password (FAILURE SCENARIO)
+        if (!user.getPassword().equals(password)) {
+            int attempts = user.getFailedLoginAttempts() + 1;
+            user.setFailedLoginAttempts(attempts);
+
+            if (attempts > 5) {
+                long penaltySeconds = (long) Math.pow(2, attempts - 5);
+                penaltySeconds = Math.min(penaltySeconds, 900);
+                user.setLockoutUntil(LocalDateTime.now().plusSeconds(penaltySeconds));
+
+                if (attempts == 6 || attempts == 15) {
+                    notificationService.sendNotification(
+                            getAdminId(),
+                            "Security Alert: Brute-Force Activity",
+                            "Progressive lockout triggered for user: '" + username + "' due to " + attempts + " consecutive failed attempts.",
+                            "SECURITY"
+                    );
+                }
+            }
+
+            userRepository.save(user);
+            activityLogService.log(null, "AUTH", "AUTH_LOGIN_FAILED", formattedUserId, "Failed login attempt for '" + username + "'. Total consecutive failures: " + attempts, "FAILED", request);
+
+            if (attempts > 5) {
+                return ResponseEntity.status(429).body(Map.of("error", "Too many failed attempts. Account temporarily rate-limited for security."));
+            }
+            return ResponseEntity.status(401).body(Map.of("error", "Invalid username or password."));
+        }
+
+        // 3. Verify Password (SUCCESS SCENARIO)
+        user.setFailedLoginAttempts(0);
+        user.setLockoutUntil(null);
+        userRepository.save(user);
+        loginTracker.remove(username);
+
+        // ==========================================
+        // SYSTEM MAINTENANCE & STATUS CHECKS
+        // ==========================================
         SystemSettings settings = systemSettingsRepository.findById(1L).orElse(null);
         if (settings != null && settings.isMaintenanceMode()) {
             if (!user.getRole().equalsIgnoreCase("Admin") && !user.getRole().equalsIgnoreCase("CPDO Admin")) {
-                activityLogService.log(
-                        user,
-                        "AUTH",
-                        "AUTH_MAINTENANCE_BLOCKED",
-                        "#USR-" + user.getId(),
-                        "User attempted login while system was under maintenance mode.",
-                        "WARNING",
-                        request
-                );
-                return ResponseEntity.status(403).body(Map.of(
-                        "error", "System is currently down for maintenance and updates. Please try again later.",
-                        "type", "MAINTENANCE_MODE"
-                ));
+                activityLogService.log(user, "AUTH", "AUTH_MAINTENANCE_BLOCKED", formattedUserId, "User attempted login while system was under maintenance mode.", "WARNING", request);
+                return ResponseEntity.status(403).body(Map.of("error", "System is currently down for maintenance and updates. Please try again later.", "type", "MAINTENANCE_MODE"));
             }
         }
 
         if ("Suspended".equalsIgnoreCase(user.getStatus())) {
-            activityLogService.log(
-                    user,
-                    "AUTH",
-                    "AUTH_SUSPENDED_BLOCKED",
-                    "#USR-" + user.getId(),
-                    "Suspended account attempted login.",
-                    "FAILED",
-                    request
-            );
+            activityLogService.log(user, "AUTH", "AUTH_SUSPENDED_BLOCKED", formattedUserId, "Suspended account attempted login.", "FAILED", request);
             return ResponseEntity.status(403).body(Map.of("error", "Your account is currently Suspended. Please contact the CPDO."));
         }
 
         if ("Deactivated".equalsIgnoreCase(user.getStatus())) {
-            activityLogService.log(
-                    user,
-                    "AUTH",
-                    "AUTH_DEACTIVATED_BLOCKED",
-                    "#USR-" + user.getId(),
-                    "Deactivated account attempted login.",
-                    "FAILED",
-                    request
-            );
+            activityLogService.log(user, "AUTH", "AUTH_DEACTIVATED_BLOCKED", formattedUserId, "Deactivated account attempted login.", "FAILED", request);
             return ResponseEntity.status(403).body(Map.of("error", "Your account has been Deactivated. Access revoked."));
         }
 
@@ -198,11 +183,12 @@ public class AuthController {
             return ResponseEntity.status(403).body(Map.of("error", "No official email is linked to this account. Cannot proceed with MFA. Contact Admin."));
         }
 
-        // GENERATE 6-DIGIT OTP
+        // ==========================================
+        // GENERATE & DISPATCH MFA OTP
+        // ==========================================
         String otp = String.format("%06d", new Random().nextInt(999999));
         mfaTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(5)));
 
-        // 🚀 LIVE CONSOLE LOG: Dynamic MFA Code Output for Verification & Defense Monitoring
         System.out.println("=================================================");
         System.out.println(">>> [AUTH] MFA CODE FOR " + user.getUsername() + ": " + otp);
         System.out.println(">>> [AUTH] RECIPIENT EMAIL: " + user.getEmail());
@@ -214,23 +200,13 @@ public class AuthController {
                 "This code will expire in 5 minutes. Do not share this code with anyone.\n\n" +
                 "If you did not attempt to log in, please contact the CPDO Administrator immediately.";
 
-        // 🚀 ISOLATED SMTP DISPATCH: Network/port timeouts won't block authentication
         try {
             emailService.sendEmail(user.getEmail(), subject, body);
         } catch (Exception e) {
-            System.err.println(">>> [WARN] SMTP Delivery failed (Cloud outbound port restricted). Use terminal OTP above. Error: " + e.getMessage());
+            System.err.println(">>> [WARN] SMTP Delivery failed. Use terminal OTP above. Error: " + e.getMessage());
         }
 
-        // ⏱️ AUDIT LOG: MFA DISPATCHED
-        activityLogService.log(
-                user,
-                "AUTH",
-                "AUTH_MFA_REQUESTED",
-                "#USR-" + user.getId(),
-                "Credentials validated. 6-digit MFA OTP generated and dispatched to registered email.",
-                "SUCCESS",
-                request
-        );
+        activityLogService.log(user, "AUTH", "AUTH_MFA_REQUESTED", formattedUserId, "Credentials validated. 6-digit MFA OTP generated and dispatched.", "SUCCESS", request);
 
         Map<String, Object> responseData = new HashMap<>();
         responseData.put("mfaRequired", true);
@@ -241,7 +217,7 @@ public class AuthController {
     }
 
     // ==========================================
-    // 4. STEP 2: VERIFY OTP & GRANT ACCESS
+    // 4. VERIFY OTP & GRANT ACCESS
     // ==========================================
     @PostMapping("/verify-mfa")
     public ResponseEntity<?> verifyMfa(@RequestBody Map<String, Object> payload, HttpServletRequest request) {
@@ -260,17 +236,8 @@ public class AuthController {
         }
 
         if (!session.otp.equals(submittedOtp)) {
-            // ⏱️ AUDIT LOG: INVALID OTP
             User attemptedUser = userRepository.findById(userId).orElse(null);
-            activityLogService.log(
-                    attemptedUser,
-                    "AUTH",
-                    "AUTH_MFA_FAILED",
-                    "#USR-" + userId,
-                    "Invalid MFA verification code entered.",
-                    "FAILED",
-                    request
-            );
+            activityLogService.log(attemptedUser, "AUTH", "AUTH_MFA_FAILED", String.format("#USR-%04d", userId), "Invalid MFA verification code entered.", "FAILED", request);
             return ResponseEntity.status(401).body(Map.of("error", "Invalid verification code. Please try again."));
         }
 
@@ -282,16 +249,7 @@ public class AuthController {
         }
         User user = userOpt.get();
 
-        // ⏱️ AUDIT LOG: SUCCESSFUL LOGIN
-        activityLogService.log(
-                user,
-                "AUTH",
-                "AUTH_LOGIN_SUCCESS",
-                "#USR-" + user.getId(),
-                "User successfully verified MFA and established active session for " + user.getRole() + " role.",
-                "SUCCESS",
-                request
-        );
+        activityLogService.log(user, "AUTH", "AUTH_LOGIN_SUCCESS", String.format("#USR-%04d", user.getId()), "User successfully verified MFA and established active session for " + user.getRole() + " role.", "SUCCESS", request);
 
         Map<String, Object> responseData = new HashMap<>();
         responseData.put("userId", user.getId());
@@ -330,11 +288,11 @@ public class AuthController {
         }
 
         User user = userOpt.get();
+        String formattedUserId = String.format("#USR-%04d", user.getId());
 
         String otp = String.format("%06d", new Random().nextInt(999999));
         resetTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(10)));
 
-        // 🚀 LIVE CONSOLE LOG: Dynamic Recovery Code Output
         System.out.println("=================================================");
         System.out.println(">>> [PASSWORD RESET] RECOVERY CODE FOR " + user.getUsername() + " (" + user.getEmail() + "): " + otp);
         System.out.println("=================================================");
@@ -346,32 +304,20 @@ public class AuthController {
                 "This code will expire in 10 minutes.\n\n" +
                 "If you did not request this, please ignore this email and your password will remain unchanged.";
 
-        // 🚀 ISOLATED SMTP DISPATCH: Safe delivery execution
         try {
             emailService.sendEmail(user.getEmail(), subject, body);
         } catch (Exception e) {
             System.err.println(">>> [WARN] Password Reset SMTP Delivery failed. Use terminal OTP above. Error: " + e.getMessage());
         }
 
-        // 🔔 NOTIFICATION TRIGGER: FORGOT PASSWORD
-        Long adminId = getAdminId();
         notificationService.sendNotification(
-                adminId,
+                getAdminId(),
                 "Support Request",
-                "Barangay Official " + user.getFirstName() + " " + user.getLastName() + " has requested a password reset. System has dispatched recovery email.",
+                user.getRole() + " " + user.getFirstName() + " " + user.getLastName() + " has requested a password reset. System has dispatched recovery email.",
                 "SUPPORT"
         );
 
-        // ⏱️ AUDIT LOG: PASSWORD RESET DISPATCHED
-        activityLogService.log(
-                user,
-                "AUTH",
-                "AUTH_PASSWORD_RESET_REQUEST",
-                "#USR-" + user.getId(),
-                "Password recovery OTP dispatched to email address: " + user.getEmail(),
-                "SUCCESS",
-                request
-        );
+        activityLogService.log(user, "AUTH", "AUTH_PASSWORD_RESET_REQUEST", formattedUserId, "Password recovery OTP dispatched to email address: " + user.getEmail(), "SUCCESS", request);
 
         return ResponseEntity.ok(Map.of("message", "A 6-digit recovery code has been sent to your email.", "userId", user.getId()));
     }
@@ -398,15 +344,7 @@ public class AuthController {
 
         if (!session.otp.equals(submittedOtp)) {
             User attemptedUser = userRepository.findById(userId).orElse(null);
-            activityLogService.log(
-                    attemptedUser,
-                    "AUTH",
-                    "AUTH_PASSWORD_RESET_FAILED",
-                    "#USR-" + userId,
-                    "Invalid password reset recovery OTP submitted.",
-                    "FAILED",
-                    request
-            );
+            activityLogService.log(attemptedUser, "AUTH", "AUTH_PASSWORD_RESET_FAILED", String.format("#USR-%04d", userId), "Invalid password reset recovery OTP submitted.", "FAILED", request);
             return ResponseEntity.status(401).body(Map.of("error", "Invalid recovery code. Please try again."));
         }
 
@@ -417,20 +355,15 @@ public class AuthController {
 
         User user = userOpt.get();
         user.setPassword(newPassword);
-        userRepository.save(user);
 
+        // Auto-recover lockout status on successful reset
+        user.setFailedLoginAttempts(0);
+        user.setLockoutUntil(null);
+
+        userRepository.save(user);
         resetTracker.remove(userId);
 
-        // ⏱️ AUDIT LOG: PASSWORD RESET SUCCESS
-        activityLogService.log(
-                user,
-                "AUTH",
-                "AUTH_PASSWORD_RESET_SUCCESS",
-                "#USR-" + user.getId(),
-                "Password credentials successfully updated via recovery verification.",
-                "SUCCESS",
-                request
-        );
+        activityLogService.log(user, "AUTH", "AUTH_PASSWORD_RESET_SUCCESS", String.format("#USR-%04d", user.getId()), "Password credentials successfully updated via recovery verification.", "SUCCESS", request);
 
         return ResponseEntity.ok(Map.of("message", "Password successfully reset! You can now log in."));
     }

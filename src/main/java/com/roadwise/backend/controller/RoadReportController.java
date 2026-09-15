@@ -9,6 +9,7 @@ import com.roadwise.backend.repository.UserRepository;
 import com.roadwise.backend.service.ActivityLogService;
 import com.roadwise.backend.service.EmailService;
 import com.roadwise.backend.service.NotificationService;
+import com.roadwise.backend.service.RoadInspectionService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.Resource;
@@ -49,6 +50,10 @@ public class RoadReportController {
     // 🚀 INJECTED ACTIVITY LOG AUDIT SERVICE
     @Autowired
     private ActivityLogService activityLogService;
+
+    // 🚀 INJECTED AI INSPECTION SERVICE
+    @Autowired
+    private RoadInspectionService aiService;
 
     @Autowired
     private SimpMessagingTemplate messagingTemplate;
@@ -129,8 +134,23 @@ public class RoadReportController {
                 Path filePath = uploadPath.resolve(uniqueFilename);
                 Files.copy(imageFile.getInputStream(), filePath);
                 report.setDamageImage(uniqueFilename);
+
+                // 🧠 AI INFERENCE TRIGGER
+                try {
+                    RoadInspectionService.InspectionResult aiResult = aiService.analyzeSeverity(imageFile);
+                    report.setSeverity(aiResult.getSeverity());
+                    report.setCvConfidenceScore(aiResult.getConfidence());
+                    System.out.println(">>> [AI SUCCESS] Evaluated " + uniqueFilename + " as " + aiResult.getSeverity() + " (" + aiResult.getConfidence() + "%)");
+                } catch (Exception e) {
+                    System.err.println(">>> [AI WARNING] Computer Vision analysis failed for " + uniqueFilename + ": " + e.getMessage());
+                    report.setSeverity("Unassessed");
+                    report.setCvConfidenceScore(0.0);
+                }
+
             } else {
                 report.setDamageImage("no_image.jpg");
+                report.setSeverity("Unassessed");
+                report.setCvConfidenceScore(0.0);
             }
 
             report.setStatus("Pending Validation");
@@ -331,8 +351,8 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 3. UPDATE REPORT (RESUBMISSION BY OFFICIAL)
-    // ==========================================
+// 3. UPDATE REPORT (RESUBMISSION BY OFFICIAL)
+// ==========================================
     @PutMapping("/update/{id}")
     public ResponseEntity<?> updateReport(@PathVariable Long id,
                                           @RequestParam(value = "userId", required = false) Long userId,
@@ -362,11 +382,26 @@ public class RoadReportController {
             if (damageLength != null) existingReport.setDamageLength(damageLength);
             if (damageWidth != null) existingReport.setDamageWidth(damageWidth);
 
+            // 🧠 RE-RUN AI ANALYSIS IF A NEW PHOTO WAS UPLOADED
             if (imageFile != null && !imageFile.isEmpty()) {
+                Path uploadPath = Paths.get(UPLOAD_DIR);
+                if (!Files.exists(uploadPath)) {
+                    Files.createDirectories(uploadPath);
+                }
+
                 String fileName = UUID.randomUUID().toString() + "_" + imageFile.getOriginalFilename();
-                Path filePath = Paths.get("uploads", fileName);
+                Path filePath = uploadPath.resolve(fileName);
                 Files.copy(imageFile.getInputStream(), filePath);
                 existingReport.setDamageImage(fileName);
+
+                try {
+                    RoadInspectionService.InspectionResult aiResult = aiService.analyzeSeverity(imageFile);
+                    existingReport.setSeverity(aiResult.getSeverity());
+                    existingReport.setCvConfidenceScore(aiResult.getConfidence());
+                    System.out.println(">>> [AI SUCCESS - RESUBMISSION] Re-evaluated " + fileName + " as " + aiResult.getSeverity() + " (" + aiResult.getConfidence() + "%)");
+                } catch (Exception e) {
+                    System.err.println(">>> [AI WARNING - RESUBMISSION] Computer Vision re-analysis failed for " + fileName + ": " + e.getMessage());
+                }
             }
 
             String currentStatus = existingReport.getStatus();
@@ -405,7 +440,7 @@ public class RoadReportController {
             );
 
             sendLiveUpdate();
-            return ResponseEntity.ok().body("Report updated successfully");
+            return ResponseEntity.ok(existingReport);
 
         } catch (Exception e) {
             return ResponseEntity.status(500).body("Error updating report: " + e.getMessage());

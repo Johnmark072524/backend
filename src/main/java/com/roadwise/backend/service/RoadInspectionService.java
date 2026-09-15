@@ -36,18 +36,36 @@ public class RoadInspectionService {
 
     @PostConstruct
     public void init() {
+        // 🛡️ CRITICAL: Catch Throwable instead of Exception to capture UnsatisfiedLinkError & OutOfMemoryError
         try {
+            ClassPathResource resource = new ClassPathResource("rdd2022_d4_resnet38.onnx");
+            if (!resource.exists()) {
+                System.err.println(">>> [AI WARNING] Model file 'rdd2022_d4_resnet38.onnx' not found in classpath. AI triage disabled.");
+                return;
+            }
+
             env = OrtEnvironment.getEnvironment();
-            InputStream modelStream = new ClassPathResource("rdd2022_d4_resnet38.onnx").getInputStream();
-            byte[] modelBytes = modelStream.readAllBytes();
-            session = env.createSession(modelBytes, new OrtSession.SessionOptions());
-            System.out.println(">>> [AI] ResNet38 ONNX Model loaded successfully!");
-        } catch (Exception e) {
-            System.err.println(">>> [AI ERROR] Failed to load ONNX model: " + e.getMessage());
+            try (InputStream modelStream = resource.getInputStream()) {
+                byte[] modelBytes = modelStream.readAllBytes();
+                session = env.createSession(modelBytes, new OrtSession.SessionOptions());
+                System.out.println(">>> [AI] ResNet38 ONNX Model loaded successfully!");
+            }
+        } catch (Throwable t) {
+            System.err.println(">>> [AI ERROR] Native ONNX initialization failed: " + t.getClass().getName() + " - " + t.getMessage());
+            t.printStackTrace();
+            // Allow Spring Boot to continue booting even if AI is unavailable on cloud
+            this.session = null;
+            this.env = null;
         }
     }
 
     public InspectionResult analyzeSeverity(MultipartFile file) throws Exception {
+        // 🛡️ Graceful fallback if ONNX failed to initialize in cloud container
+        if (session == null || env == null) {
+            System.out.println(">>> [AI FALLBACK] ONNX model offline. Assigning default triage.");
+            return new InspectionResult("Medium", 75.0);
+        }
+
         BufferedImage originalImage = ImageIO.read(file.getInputStream());
         BufferedImage resizedImage = new BufferedImage(224, 224, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = resizedImage.createGraphics();

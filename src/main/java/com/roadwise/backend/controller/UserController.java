@@ -6,16 +6,13 @@ import com.roadwise.backend.repository.UserRepository;
 import com.roadwise.backend.service.ActivityLogService;
 import com.roadwise.backend.service.EmailService;
 import com.roadwise.backend.service.NotificationService;
+import com.roadwise.backend.service.SupabaseStorageService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -39,11 +36,12 @@ public class UserController {
     @Autowired
     private NotificationService notificationService;
 
-    // 🚀 INJECTED ACTIVITY LOG AUDIT SERVICE
     @Autowired
     private ActivityLogService activityLogService;
 
-    private static final String UPLOAD_DIR = "uploads/";
+    // 🚀 INJECTED SUPABASE CLOUD STORAGE SERVICE
+    @Autowired
+    private SupabaseStorageService supabaseStorageService;
 
     // ==========================================
     // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
@@ -81,7 +79,6 @@ public class UserController {
 
         userRepository.save(user);
 
-        // ⏱️ AUDIT LOG: PROFILE UPDATE
         activityLogService.log(
                 user,
                 "USER",
@@ -96,7 +93,7 @@ public class UserController {
     }
 
     // ==========================================
-    // 2. UPLOAD PROFILE PICTURE
+    // 2. UPLOAD PROFILE PICTURE (SUPABASE STORAGE)
     // ==========================================
     @PostMapping(value = "/{id}/profile-picture", consumes = {"multipart/form-data"})
     public ResponseEntity<?> uploadProfilePicture(
@@ -108,14 +105,11 @@ public class UserController {
             if (userOpt.isEmpty()) return ResponseEntity.notFound().build();
 
             User user = userOpt.get();
-            Path uploadPath = Paths.get(UPLOAD_DIR);
-            if (!Files.exists(uploadPath)) Files.createDirectories(uploadPath);
 
-            String uniqueFilename = UUID.randomUUID().toString() + "_" + file.getOriginalFilename();
-            Path filePath = uploadPath.resolve(uniqueFilename);
-            Files.copy(file.getInputStream(), filePath);
+            // ☁️ UPLOAD DIRECTLY TO SUPABASE OBJECT STORAGE
+            String cloudAvatarUrl = supabaseStorageService.uploadImage(file);
 
-            user.setProfilePicture(uniqueFilename);
+            user.setProfilePicture(cloudAvatarUrl);
             userRepository.save(user);
 
             // ⏱️ AUDIT LOG: AVATAR CHANGE
@@ -131,11 +125,11 @@ public class UserController {
 
             return ResponseEntity.ok(Map.of(
                     "message", "Profile picture updated successfully!",
-                    "profilePicture", uniqueFilename
+                    "profilePicture", cloudAvatarUrl
             ));
-        } catch (IOException e) {
+        } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.internalServerError().body(Map.of("error", "Failed to upload profile picture."));
+            return ResponseEntity.internalServerError().body(Map.of("error", "Failed to upload profile picture: " + e.getMessage()));
         }
     }
 
@@ -180,7 +174,6 @@ public class UserController {
             if (tracker.attempts >= 5) {
                 tracker.lockoutTime = LocalDateTime.now();
 
-                // ⏱️ AUDIT LOG: PASSWORD LOCKOUT
                 activityLogService.log(
                         user,
                         "AUTH",
@@ -201,7 +194,6 @@ public class UserController {
         user.setPassword(newPassword);
         userRepository.save(user);
 
-        // ⏱️ AUDIT LOG: PASSWORD UPDATE SUCCESS
         activityLogService.log(
                 user,
                 "AUTH",
@@ -216,7 +208,7 @@ public class UserController {
     }
 
     // ==========================================
-    // 🚀 0. GET ALL SYSTEM USERS (Fixes the 404 Error)
+    // 0. GET ALL SYSTEM USERS
     // ==========================================
     @GetMapping
     public ResponseEntity<List<User>> getAllUsers() {
@@ -225,7 +217,7 @@ public class UserController {
     }
 
     // ==========================================
-    // 4. FETCH ALL BARANGAY OFFICIALS (For Admin)
+    // 4. FETCH ALL BARANGAY OFFICIALS
     // ==========================================
     @GetMapping("/officials")
     public ResponseEntity<List<User>> getBarangayOfficials() {
@@ -234,7 +226,7 @@ public class UserController {
     }
 
     // ==========================================
-    // 5. PROVISION NEW BARANGAY OFFICIAL ACCOUNT (ADMIN)
+    // 5. PROVISION NEW BARANGAY OFFICIAL ACCOUNT
     // ==========================================
     @PostMapping("/register")
     public ResponseEntity<?> registerOfficial(
@@ -256,12 +248,10 @@ public class UserController {
         newUser.setRole(payload.get("role"));
         newUser.setStatus("Active");
 
-        // 🛡️ 1-OFFICIAL-PER-BARANGAY VALIDATION
         if (payload.get("barangayId") != null && !payload.get("barangayId").isEmpty()) {
             Long brgyId = Long.parseLong(payload.get("barangayId"));
             List<User> existingOfficials = userRepository.findByBarangayId(brgyId);
 
-            // Check if another active/suspended official already occupies this barangay
             Optional<User> activeOfficial = existingOfficials.stream()
                     .filter(u -> u.getStatus() == null || !u.getStatus().equalsIgnoreCase("Deactivated"))
                     .findFirst();
@@ -277,7 +267,6 @@ public class UserController {
 
         User savedUser = userRepository.save(newUser);
 
-        // 🔔 NOTIFICATION TRIGGER
         notificationService.sendNotification(
                 savedUser.getId(),
                 "Account Provisioned",
@@ -285,7 +274,6 @@ public class UserController {
                 "ACCOUNT"
         );
 
-        // 🚀 EMAIL TRIGGER
         if (savedUser.getEmail() != null && !savedUser.getEmail().isEmpty()) {
             String subject = "Welcome to RoadWise - Your Account Credentials";
             String emailBody = "Hello " + savedUser.getFirstName() + ",\n\n" +
@@ -299,7 +287,6 @@ public class UserController {
             emailService.sendEmail(savedUser.getEmail(), subject, emailBody);
         }
 
-        // ⏱️ AUDIT LOG: Attributed to Admin
         String adminIdStr = payload.get("adminId");
         Long adminId = (adminIdStr != null && !adminIdStr.isEmpty()) ? Long.valueOf(adminIdStr) : getAdminId();
         User adminActor = userRepository.findById(adminId).orElse(null);
@@ -319,7 +306,7 @@ public class UserController {
     }
 
     // ==========================================
-    // 6. GET SINGLE USER DATA (For Manage Modal)
+    // 6. GET SINGLE USER DATA
     // ==========================================
     @GetMapping("/{id}")
     public ResponseEntity<User> getUserById(@PathVariable Long id) {
@@ -364,12 +351,10 @@ public class UserController {
             }
         }
 
-        // 🛡️ 1-OFFICIAL-PER-BARANGAY VALIDATION ON REASSIGNMENT
         if (updates.get("barangayId") != null && !updates.get("barangayId").isEmpty()) {
             Long brgyId = Long.parseLong(updates.get("barangayId"));
             List<User> existingOfficials = userRepository.findByBarangayId(brgyId);
 
-            // Check if ANOTHER user (not the one being edited) already actively occupies this barangay
             Optional<User> conflictOfficial = existingOfficials.stream()
                     .filter(u -> !u.getId().equals(id) && (u.getStatus() == null || !u.getStatus().equalsIgnoreCase("Deactivated")))
                     .findFirst();
@@ -385,7 +370,6 @@ public class UserController {
 
         userRepository.save(user);
 
-        // ⏱️ AUDIT LOG: Attributed to Admin
         String adminIdStr = updates.get("adminId");
         Long adminId = (adminIdStr != null && !adminIdStr.isEmpty()) ? Long.valueOf(adminIdStr) : getAdminId();
         User adminActor = userRepository.findById(adminId).orElse(null);
@@ -405,7 +389,7 @@ public class UserController {
     }
 
     // ==========================================
-    // 8. 🚨 ADMIN: EMERGENCY PASSWORD RESET
+    // 8. ADMIN: EMERGENCY PASSWORD RESET
     // ==========================================
     @PutMapping("/{id}/emergency-reset")
     public ResponseEntity<?> emergencyPasswordReset(
@@ -429,7 +413,6 @@ public class UserController {
                 "SECURITY"
         );
 
-        // ⏱️ AUDIT LOG: Attributed to Admin
         String adminIdStr = (payload != null) ? payload.get("adminId") : null;
         Long adminId = (adminIdStr != null && !adminIdStr.isEmpty()) ? Long.valueOf(adminIdStr) : getAdminId();
         User adminActor = userRepository.findById(adminId).orElse(null);

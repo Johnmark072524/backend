@@ -10,6 +10,7 @@ import com.roadwise.backend.service.ActivityLogService;
 import com.roadwise.backend.service.EmailService;
 import com.roadwise.backend.service.NotificationService;
 import com.roadwise.backend.service.RoadInspectionService;
+import com.roadwise.backend.service.SupabaseStorageService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.Resource;
@@ -21,7 +22,6 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -47,18 +47,18 @@ public class RoadReportController {
     @Autowired
     private NotificationService notificationService;
 
-    // 🚀 INJECTED ACTIVITY LOG AUDIT SERVICE
     @Autowired
     private ActivityLogService activityLogService;
 
-    // 🚀 INJECTED AI INSPECTION SERVICE
     @Autowired
     private RoadInspectionService aiService;
 
+    // 🚀 INJECTED SUPABASE CLOUD STORAGE SERVICE
+    @Autowired
+    private SupabaseStorageService supabaseStorageService;
+
     @Autowired
     private SimpMessagingTemplate messagingTemplate;
-
-    private static final String UPLOAD_DIR = "uploads/";
 
     // ==========================================
     // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
@@ -123,26 +123,19 @@ public class RoadReportController {
                 }
             }
 
-            Path uploadPath = Paths.get(UPLOAD_DIR);
-            if (!Files.exists(uploadPath)) {
-                Files.createDirectories(uploadPath);
-            }
-
+            // ☁️ UPLOAD TO SUPABASE OBJECT STORAGE & TRIGGER AI
             if (imageFile != null && !imageFile.isEmpty()) {
-                String originalFilename = imageFile.getOriginalFilename();
-                String uniqueFilename = UUID.randomUUID().toString() + "_" + originalFilename;
-                Path filePath = uploadPath.resolve(uniqueFilename);
-                Files.copy(imageFile.getInputStream(), filePath);
-                report.setDamageImage(uniqueFilename);
+                String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
+                report.setDamageImage(cloudImageUrl);
 
                 // 🧠 AI INFERENCE TRIGGER
                 try {
                     RoadInspectionService.InspectionResult aiResult = aiService.analyzeSeverity(imageFile);
                     report.setSeverity(aiResult.getSeverity());
                     report.setCvConfidenceScore(aiResult.getConfidence());
-                    System.out.println(">>> [AI SUCCESS] Evaluated " + uniqueFilename + " as " + aiResult.getSeverity() + " (" + aiResult.getConfidence() + "%)");
+                    System.out.println(">>> [AI SUCCESS] Evaluated " + imageFile.getOriginalFilename() + " as " + aiResult.getSeverity() + " (" + aiResult.getConfidence() + "%)");
                 } catch (Exception e) {
-                    System.err.println(">>> [AI WARNING] Computer Vision analysis failed for " + uniqueFilename + ": " + e.getMessage());
+                    System.err.println(">>> [AI WARNING] Computer Vision analysis failed: " + e.getMessage());
                     report.setSeverity("Unassessed");
                     report.setCvConfidenceScore(0.0);
                 }
@@ -155,7 +148,6 @@ public class RoadReportController {
 
             report.setStatus("Pending Validation");
 
-            // Save the report first to get the ID
             RoadReport savedReport = repository.save(report);
 
             // 🔔 SMART NOTIFICATIONS
@@ -185,7 +177,7 @@ public class RoadReportController {
                 );
             }
 
-            // ⏱️ AUDIT LOG: NEW REPORT SUBMITTED (Attributed to submitter)
+            // ⏱️ AUDIT LOG: NEW REPORT SUBMITTED
             activityLogService.log(
                     foundUser,
                     "PROJECT",
@@ -199,9 +191,9 @@ public class RoadReportController {
             sendLiveUpdate();
             return savedReport;
 
-        } catch (IOException e) {
+        } catch (Exception e) {
             e.printStackTrace();
-            throw new RuntimeException("Failed to save image file to the server!");
+            throw new RuntimeException("Failed to upload image or submit report: " + e.getMessage());
         }
     }
 
@@ -234,7 +226,6 @@ public class RoadReportController {
             HttpServletRequest request) {
 
         return repository.findById(id).map(report -> {
-
             String newStatus = payload.get("status");
             String adminRemarks = payload.get("adminRemarks");
             String passedUserIdStr = payload.get("userId");
@@ -255,7 +246,6 @@ public class RoadReportController {
             Long adminId = getAdminId();
             Long ceoId = getCeoId();
 
-            // 🔔 NOTIFICATION TRIGGERS
             if (newStatus != null) {
                 if (newStatus.equalsIgnoreCase("Completed") || (newStatus.equalsIgnoreCase("In Progress") && (adminRemarks == null || adminRemarks.trim().isEmpty()))) {
                     notificationService.sendNotification(
@@ -307,7 +297,6 @@ public class RoadReportController {
                 }
             }
 
-            // ⏱️ RESOLVE ACTOR & LOG ACTION (Hybrid Resolution)
             User actor;
             String logCategory = "PROJECT";
             String logAction = "STATUS_UPDATED_" + (newStatus != null ? newStatus.toUpperCase().replace(" ", "_") : "UNKNOWN");
@@ -317,19 +306,19 @@ public class RoadReportController {
             if (newStatus != null && (newStatus.equalsIgnoreCase("Validated") || newStatus.equalsIgnoreCase("Rejected"))) {
                 logCategory = "QA";
                 logAction = newStatus.equalsIgnoreCase("Validated") ? "REPORT_VALIDATED" : "REPORT_REJECTED";
-                actor = resolveActor(explicitUserId, adminId); // Attributed to CPDO Admin
+                actor = resolveActor(explicitUserId, adminId);
             } else if (newStatus != null && newStatus.equalsIgnoreCase("In Progress") && adminRemarks != null && !adminRemarks.trim().isEmpty()) {
                 logCategory = "QA";
                 logAction = "REPAIR_REWORK_REQUESTED";
-                actor = resolveActor(explicitUserId, adminId); // Attributed to CPDO Admin
+                actor = resolveActor(explicitUserId, adminId);
             } else if (newStatus != null && (newStatus.equalsIgnoreCase("In Progress") || newStatus.equalsIgnoreCase("Completed"))) {
                 logCategory = "PROJECT";
                 logAction = newStatus.equalsIgnoreCase("In Progress") ? "REPAIR_IN_PROGRESS" : "REPAIR_COMPLETED";
-                actor = resolveActor(explicitUserId, ceoId); // Attributed to CEO Engineer
+                actor = resolveActor(explicitUserId, ceoId);
             } else if (newStatus != null && (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved"))) {
                 logCategory = "QA";
                 logAction = "PROJECT_OFFICIALLY_CLOSED";
-                actor = resolveActor(explicitUserId, adminId); // Attributed to CPDO Admin
+                actor = resolveActor(explicitUserId, adminId);
             } else {
                 actor = resolveActor(explicitUserId, adminId);
             }
@@ -351,8 +340,8 @@ public class RoadReportController {
     }
 
     // ==========================================
-// 3. UPDATE REPORT (RESUBMISSION BY OFFICIAL)
-// ==========================================
+    // 3. UPDATE REPORT (RESUBMISSION BY OFFICIAL)
+    // ==========================================
     @PutMapping("/update/{id}")
     public ResponseEntity<?> updateReport(@PathVariable Long id,
                                           @RequestParam(value = "userId", required = false) Long userId,
@@ -382,25 +371,18 @@ public class RoadReportController {
             if (damageLength != null) existingReport.setDamageLength(damageLength);
             if (damageWidth != null) existingReport.setDamageWidth(damageWidth);
 
-            // 🧠 RE-RUN AI ANALYSIS IF A NEW PHOTO WAS UPLOADED
+            // ☁️ UPLOAD TO SUPABASE & RE-RUN AI ANALYSIS IF A NEW PHOTO WAS PROVIDED
             if (imageFile != null && !imageFile.isEmpty()) {
-                Path uploadPath = Paths.get(UPLOAD_DIR);
-                if (!Files.exists(uploadPath)) {
-                    Files.createDirectories(uploadPath);
-                }
-
-                String fileName = UUID.randomUUID().toString() + "_" + imageFile.getOriginalFilename();
-                Path filePath = uploadPath.resolve(fileName);
-                Files.copy(imageFile.getInputStream(), filePath);
-                existingReport.setDamageImage(fileName);
+                String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
+                existingReport.setDamageImage(cloudImageUrl);
 
                 try {
                     RoadInspectionService.InspectionResult aiResult = aiService.analyzeSeverity(imageFile);
                     existingReport.setSeverity(aiResult.getSeverity());
                     existingReport.setCvConfidenceScore(aiResult.getConfidence());
-                    System.out.println(">>> [AI SUCCESS - RESUBMISSION] Re-evaluated " + fileName + " as " + aiResult.getSeverity() + " (" + aiResult.getConfidence() + "%)");
+                    System.out.println(">>> [AI SUCCESS - RESUBMISSION] Re-evaluated " + imageFile.getOriginalFilename() + " as " + aiResult.getSeverity() + " (" + aiResult.getConfidence() + "%)");
                 } catch (Exception e) {
-                    System.err.println(">>> [AI WARNING - RESUBMISSION] Computer Vision re-analysis failed for " + fileName + ": " + e.getMessage());
+                    System.err.println(">>> [AI WARNING - RESUBMISSION] Computer Vision re-analysis failed: " + e.getMessage());
                 }
             }
 
@@ -427,7 +409,6 @@ public class RoadReportController {
                 );
             }
 
-            // ⏱️ AUDIT LOG: Attributed to Barangay Submitter
             User actor = (userId != null) ? userRepository.findById(userId).orElse(existingReport.getUser()) : existingReport.getUser();
             activityLogService.log(
                     actor,
@@ -469,7 +450,6 @@ public class RoadReportController {
                 repository.saveAll(allReports);
 
                 final int finalDispatchedCount = dispatchedCount;
-
                 Long ceoId = getCeoId();
                 if (ceoId != null) {
                     notificationService.sendNotification(
@@ -491,7 +471,6 @@ public class RoadReportController {
                     });
                 }
 
-                // ⏱️ AUDIT LOG: Attributed to CPDO Admin
                 User adminActor = resolveActor(userId, getAdminId());
                 activityLogService.log(
                         adminActor,
@@ -559,7 +538,6 @@ public class RoadReportController {
             );
 
             Map<User, List<RoadReport>> deferredByUser = new HashMap<>();
-
             for (RoadReport report : reportsToDefer) {
                 if (report.getUser() != null) {
                     deferredByUser.computeIfAbsent(report.getUser(), k -> new ArrayList<>()).add(report);
@@ -580,7 +558,6 @@ public class RoadReportController {
                 sendBatchDeferEmail(entry.getKey(), entry.getValue(), reason);
             }
 
-            // ⏱️ AUDIT LOG: Attributed to CEO Engineer
             User ceoActor = resolveActor(explicitUserId, getCeoId());
             activityLogService.log(
                     ceoActor,
@@ -615,15 +592,10 @@ public class RoadReportController {
         try {
             RoadReport report = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
 
+            // ☁️ UPLOAD PROOF IMAGE DIRECTLY TO SUPABASE
             if (proofImage != null && !proofImage.isEmpty()) {
-                Path uploadPath = Paths.get(UPLOAD_DIR);
-                if (!Files.exists(uploadPath)) Files.createDirectories(uploadPath);
-
-                String fileName = UUID.randomUUID().toString() + "_" + proofImage.getOriginalFilename();
-                Path filePath = uploadPath.resolve(fileName);
-                Files.copy(proofImage.getInputStream(), filePath);
-
-                report.setProofOfRepairImage(fileName);
+                String cloudProofUrl = supabaseStorageService.uploadImage(proofImage);
+                report.setProofOfRepairImage(cloudProofUrl);
             }
 
             if (repairRemarks != null) report.setRepairRemarks(repairRemarks);
@@ -641,7 +613,6 @@ public class RoadReportController {
                     "REPORT"
             );
 
-            // ⏱️ AUDIT LOG: Attributed to CEO Engineer
             User ceoActor = resolveActor(userId, getCeoId());
             activityLogService.log(
                     ceoActor,
@@ -700,7 +671,6 @@ public class RoadReportController {
                 );
             }
 
-            // ⏱️ AUDIT LOG: Attributed to CEO Engineer
             User ceoActor = resolveActor(explicitUserId, getCeoId());
             activityLogService.log(
                     ceoActor,
@@ -843,7 +813,6 @@ public class RoadReportController {
 
             repository.saveAll(reportsToArchive);
 
-            // ⏱️ AUDIT LOG: Attributed to CPDO Admin
             User adminActor = resolveActor(explicitUserId, getAdminId());
             activityLogService.log(
                     adminActor,
@@ -885,12 +854,10 @@ public class RoadReportController {
             HttpServletRequest request) {
         try {
             int archivedCount = repository.archiveAnnualCycleReports();
-
             List<User> allUsers = userRepository.findAll();
 
             String notifTitle = "📅 Annual Road Inventory Cycle Initialized";
             String notifMsg = "The CPDO has initialized the new annual audit cycle. Completed and validated reports have been archived. Active repairs remain in progress.";
-
             String emailSubject = "RoadWise SJDM: New Annual Road Inventory Cycle Initialized";
 
             for (User user : allUsers) {
@@ -912,7 +879,6 @@ public class RoadReportController {
                 }
             }
 
-            // ⏱️ AUDIT LOG: Attributed to CPDO Admin
             User adminActor = resolveActor(userId, getAdminId());
             activityLogService.log(
                     adminActor,
@@ -940,7 +906,7 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // SERVE UPLOADED IMAGES
+    // SERVE UPLOADED IMAGES (LEGACY LOCAL FALLBACK)
     // ==========================================
     @GetMapping("/image/{filename:.+}")
     public ResponseEntity<Resource> serveImage(@PathVariable String filename) {

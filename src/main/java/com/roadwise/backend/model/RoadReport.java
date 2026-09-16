@@ -23,7 +23,9 @@ public class RoadReport {
     private Double lengthOfCulverts;
 
     // --- 2. Damage Information (From Frontend) ---
+    @Column(columnDefinition = "TEXT")
     private String damageImage;
+
     @Column(columnDefinition = "TEXT")
     private String damageDescription;
     private Double latitude;
@@ -43,6 +45,8 @@ public class RoadReport {
 
     @Column(columnDefinition = "TEXT")
     private String repairRemarks;
+
+    @Column(columnDefinition = "TEXT")
     private String proofOfRepairImage;
 
     // AI Classification

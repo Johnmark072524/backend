@@ -1,28 +1,23 @@
 package com.roadwise.backend.service;
 
-import ai.onnxruntime.*;
-import org.springframework.core.io.ClassPathResource;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.RestTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
-import javax.imageio.ImageIO;
-import jakarta.annotation.PostConstruct;
-import java.awt.*;
-import java.awt.image.BufferedImage;
-import java.io.InputStream;
-import java.nio.FloatBuffer;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.util.Collections;
+import java.util.Map;
 
 @Service
 public class RoadInspectionService {
 
-    private OrtEnvironment env;
-    private OrtSession session;
+    @Value("${ai.service.url:https://roadwise-ai-service.onrender.com}")
+    private String aiServiceUrl;
 
-    private final String[] SEVERITY_LEVELS = {"Low", "Medium", "High"};
+    private final RestTemplate restTemplate = new RestTemplate();
 
     public static class InspectionResult {
         private final String severity;
@@ -37,95 +32,49 @@ public class RoadInspectionService {
         public double getConfidence() { return confidence; }
     }
 
-    @PostConstruct
-    public void init() {
+    public InspectionResult analyzeSeverity(MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            return new InspectionResult("Low", 100.0);
+        }
+
         try {
-            ClassPathResource resource = new ClassPathResource("rdd2022_d4_resnet38.onnx");
-            if (!resource.exists()) {
-                System.err.println(">>> [AI WARNING] Model file 'rdd2022_d4_resnet38.onnx' not found in classpath. AI triage disabled.");
-                return;
-            }
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
 
-            env = OrtEnvironment.getEnvironment();
-
-            // 🚀 Write stream directly to a disk temp file to bypass Java Heap OOM
-            Path tempModel = Files.createTempFile("resnet38_", ".onnx");
-            tempModel.toFile().deleteOnExit();
-
-            try (InputStream in = resource.getInputStream()) {
-                Files.copy(in, tempModel, StandardCopyOption.REPLACE_EXISTING);
-            }
-
-            // Load ONNX session directly from the disk path (uses near-zero JVM heap)
-            session = env.createSession(tempModel.toAbsolutePath().toString(), new OrtSession.SessionOptions());
-            System.out.println(">>> [AI] ResNet38 ONNX Model loaded successfully via disk streaming!");
-
-        } catch (Throwable t) {
-            System.err.println(">>> [AI ERROR] Native ONNX initialization failed: " + t.getClass().getName() + " - " + t.getMessage());
-            t.printStackTrace();
-            // Allows Spring Boot and the rest of the application to boot even if native AI fails
-            this.session = null;
-            this.env = null;
-        }
-    }
-
-    public InspectionResult analyzeSeverity(MultipartFile file) throws Exception {
-        // Fallback protection if ONNX failed to load on Render
-        if (session == null || env == null) {
-            System.out.println(">>> [AI FALLBACK] ONNX model offline. Assigning default triage.");
-            return new InspectionResult("Medium", 75.0);
-        }
-
-        BufferedImage originalImage = ImageIO.read(file.getInputStream());
-        BufferedImage resizedImage = new BufferedImage(224, 224, BufferedImage.TYPE_INT_RGB);
-        Graphics2D g = resizedImage.createGraphics();
-        g.drawImage(originalImage, 0, 0, 224, 224, null);
-        g.dispose();
-
-        FloatBuffer tensorBuffer = FloatBuffer.allocate(1 * 3 * 224 * 224);
-        for (int c = 0; c < 3; c++) {
-            for (int y = 0; y < 224; y++) {
-                for (int x = 0; x < 224; x++) {
-                    int rgb = resizedImage.getRGB(x, y);
-                    float value;
-                    if (c == 0) value = ((rgb >> 16) & 0xFF) / 255.0f;
-                    else if (c == 1) value = ((rgb >> 8) & 0xFF) / 255.0f;
-                    else value = (rgb & 0xFF) / 255.0f;
-                    tensorBuffer.put(value);
+            // Wrap file bytes in ByteArrayResource and preserve original filename
+            ByteArrayResource fileResource = new ByteArrayResource(file.getBytes()) {
+                @Override
+                public String getFilename() {
+                    return file.getOriginalFilename() != null ? file.getOriginalFilename() : "damage_image.jpg";
                 }
+            };
+
+            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+            body.add("file", fileResource);
+
+            HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+
+            ResponseEntity<Map> response = restTemplate.postForEntity(
+                    aiServiceUrl + "/predict",
+                    requestEntity,
+                    Map.class
+            );
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                Map<String, Object> respBody = response.getBody();
+                String severity = respBody.getOrDefault("severity", "Medium").toString();
+                double confidence = Double.parseDouble(respBody.getOrDefault("confidence", 75.0).toString());
+
+                System.out.println(">>> [AI SUCCESS] Predicted: " + severity + " (" + confidence + "%)");
+                return new InspectionResult(severity, confidence);
+            } else {
+                System.err.println(">>> [AI HTTP ERROR] Microservice returned status: " + response.getStatusCode());
             }
+        } catch (Exception e) {
+            System.err.println(">>> [AI CLIENT ERROR] Microservice communication failed: " + e.getMessage());
         }
-        tensorBuffer.rewind();
 
-        long[] shape = {1, 3, 224, 224};
-        try (OnnxTensor inputTensor = OnnxTensor.createTensor(env, tensorBuffer, shape)) {
-            String inputName = session.getInputNames().iterator().next();
-            try (OrtSession.Result results = session.run(Collections.singletonMap(inputName, inputTensor))) {
-                float[][] output = (float[][]) results.get(0).getValue();
-                float[] logits = output[0];
-
-                // Softmax calculation for true confidence percentage
-                float maxLogit = Math.max(logits[0], Math.max(logits[1], logits[2]));
-                float sumExp = 0.0f;
-                float[] exp = new float[3];
-                for (int i = 0; i < 3; i++) {
-                    exp[i] = (float) Math.exp(logits[i] - maxLogit);
-                    sumExp += exp[i];
-                }
-
-                int maxIndex = 0;
-                float highestProb = exp[0] / sumExp;
-                for (int i = 1; i < 3; i++) {
-                    float prob = exp[i] / sumExp;
-                    if (prob > highestProb) {
-                        highestProb = prob;
-                        maxIndex = i;
-                    }
-                }
-
-                double confidencePercentage = Math.round(highestProb * 1000.0) / 10.0;
-                return new InspectionResult(SEVERITY_LEVELS[maxIndex], confidencePercentage);
-            }
-        }
+        // Safe fallback triage if the microservice is temporarily waking up from cold sleep
+        return new InspectionResult("Medium", 75.0);
     }
 }

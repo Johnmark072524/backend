@@ -11,6 +11,9 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.InputStream;
 import java.nio.FloatBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Collections;
 
 @Service
@@ -36,7 +39,6 @@ public class RoadInspectionService {
 
     @PostConstruct
     public void init() {
-        // 🛡️ CRITICAL: Catch Throwable instead of Exception to capture UnsatisfiedLinkError & OutOfMemoryError
         try {
             ClassPathResource resource = new ClassPathResource("rdd2022_d4_resnet38.onnx");
             if (!resource.exists()) {
@@ -45,22 +47,30 @@ public class RoadInspectionService {
             }
 
             env = OrtEnvironment.getEnvironment();
-            try (InputStream modelStream = resource.getInputStream()) {
-                byte[] modelBytes = modelStream.readAllBytes();
-                session = env.createSession(modelBytes, new OrtSession.SessionOptions());
-                System.out.println(">>> [AI] ResNet38 ONNX Model loaded successfully!");
+
+            // 🚀 Write stream directly to a disk temp file to bypass Java Heap OOM
+            Path tempModel = Files.createTempFile("resnet38_", ".onnx");
+            tempModel.toFile().deleteOnExit();
+
+            try (InputStream in = resource.getInputStream()) {
+                Files.copy(in, tempModel, StandardCopyOption.REPLACE_EXISTING);
             }
+
+            // Load ONNX session directly from the disk path (uses near-zero JVM heap)
+            session = env.createSession(tempModel.toAbsolutePath().toString(), new OrtSession.SessionOptions());
+            System.out.println(">>> [AI] ResNet38 ONNX Model loaded successfully via disk streaming!");
+
         } catch (Throwable t) {
             System.err.println(">>> [AI ERROR] Native ONNX initialization failed: " + t.getClass().getName() + " - " + t.getMessage());
             t.printStackTrace();
-            // Allow Spring Boot to continue booting even if AI is unavailable on cloud
+            // Allows Spring Boot and the rest of the application to boot even if native AI fails
             this.session = null;
             this.env = null;
         }
     }
 
     public InspectionResult analyzeSeverity(MultipartFile file) throws Exception {
-        // 🛡️ Graceful fallback if ONNX failed to initialize in cloud container
+        // Fallback protection if ONNX failed to load on Render
         if (session == null || env == null) {
             System.out.println(">>> [AI FALLBACK] ONNX model offline. Assigning default triage.");
             return new InspectionResult("Medium", 75.0);

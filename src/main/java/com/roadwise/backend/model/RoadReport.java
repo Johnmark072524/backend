@@ -1,5 +1,6 @@
 package com.roadwise.backend.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import java.time.LocalDate;
 
@@ -54,11 +55,12 @@ public class RoadReport {
     private Double cvConfidenceScore;
 
     // Relationships
-    @com.fasterxml.jackson.annotation.JsonIgnoreProperties({"reports", "hibernateLazyInitializer", "handler"})
+    @JsonIgnoreProperties({"reports", "hibernateLazyInitializer", "handler"})
     @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "barangay_id")
     private Barangay barangay;
 
+    @JsonIgnoreProperties({"hibernateLazyInitializer", "handler", "password"})
     @ManyToOne
     @JoinColumn(name = "user_id")
     private User user;
@@ -70,7 +72,6 @@ public class RoadReport {
     @Column(name = "date_submitted")
     private LocalDate dateSubmitted;
 
-    // Sets today's date and the active fiscal cycle year before saving
     @PrePersist
     public void prePersist() {
         if (this.dateSubmitted == null) {

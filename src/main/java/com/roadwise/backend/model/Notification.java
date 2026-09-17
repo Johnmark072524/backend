@@ -1,6 +1,7 @@
 package com.roadwise.backend.model;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import java.time.LocalDateTime;
 
@@ -12,8 +13,7 @@ public class Notification {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // 🚀 Links the notification to a specific user (Admin, Official, or CEO)
-    @JsonIgnoreProperties({"hibernateLazyInitializer", "handler", "password"})
+    @JsonIgnore
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "recipient_id", nullable = false)
     private User recipient;
@@ -30,14 +30,20 @@ public class Notification {
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 
-    // e.g., "SYSTEM", "REPORT", "INFRASTRUCTURE"
     @Column(length = 50)
     private String type;
 
-    // Automatically sets the timestamp when a notification is created
+    @JsonProperty("recipientId")
+    public Long getRecipientId() {
+        return recipient != null ? recipient.getId() : null;
+    }
+
     @PrePersist
     protected void onCreate() {
         this.createdAt = LocalDateTime.now();
+    }
+
+    public Notification() {
     }
 
     // ==========================================

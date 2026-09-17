@@ -1,11 +1,13 @@
 package com.roadwise.backend.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "users")
+@JsonIgnoreProperties({"hibernateLazyInitializer", "handler"})
 public class User {
 
     @Id
@@ -96,7 +98,6 @@ public class User {
 
     // Rate Limiting Getters & Setters
     public int getFailedLoginAttempts() {
-        // Safe Getter: If DB has null (old user), treat it as 0 to prevent 500 crashes
         return failedLoginAttempts == null ? 0 : failedLoginAttempts;
     }
 

@@ -1,6 +1,7 @@
 package com.roadwise.backend.controller;
 
 import com.roadwise.backend.model.Barangay;
+import com.roadwise.backend.model.ReportStatusLog;
 import com.roadwise.backend.model.RoadReport;
 import com.roadwise.backend.model.User;
 import com.roadwise.backend.repository.BarangayRepository;
@@ -9,6 +10,7 @@ import com.roadwise.backend.repository.UserRepository;
 import com.roadwise.backend.service.ActivityLogService;
 import com.roadwise.backend.service.EmailService;
 import com.roadwise.backend.service.NotificationService;
+import com.roadwise.backend.service.ReportStatusLogService;
 import com.roadwise.backend.service.RoadInspectionService;
 import com.roadwise.backend.service.SupabaseStorageService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -53,12 +55,15 @@ public class RoadReportController {
     @Autowired
     private RoadInspectionService aiService;
 
-    // 🚀 INJECTED SUPABASE CLOUD STORAGE SERVICE
     @Autowired
     private SupabaseStorageService supabaseStorageService;
 
     @Autowired
     private SimpMessagingTemplate messagingTemplate;
+
+    // 🚀 INJECTED STATUS LIFECYCLE AUDIT TRAIL SERVICE
+    @Autowired
+    private ReportStatusLogService reportStatusLogService;
 
     // ==========================================
     // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
@@ -150,6 +155,19 @@ public class RoadReportController {
 
             RoadReport savedReport = repository.save(report);
 
+            // 📋 RECORD INITIAL LIFECYCLE EVENT
+            reportStatusLogService.log(
+                    savedReport,
+                    "SUBMITTED",
+                    null,
+                    "Pending Validation",
+                    "Road damage report submitted for '" + savedReport.getCityRoadName() + "'.",
+                    foundUser,
+                    savedReport.getReportedBy(),
+                    "Barangay Official",
+                    savedReport.getDamageImage()
+            );
+
             // 🔔 SMART NOTIFICATIONS
             Long adminId = getAdminId();
             if (savedReport.getSeverity() != null && savedReport.getSeverity().equalsIgnoreCase("High")) {
@@ -226,6 +244,7 @@ public class RoadReportController {
             HttpServletRequest request) {
 
         return repository.findById(id).map(report -> {
+            String previousStatus = report.getStatus();
             String newStatus = payload.get("status");
             String adminRemarks = payload.get("adminRemarks");
             String passedUserIdStr = payload.get("userId");
@@ -303,25 +322,44 @@ public class RoadReportController {
             String logDesc = "Project status transitioned to '" + newStatus + "' on " + report.getCityRoadName() + "." +
                     (adminRemarks != null && !adminRemarks.trim().isEmpty() ? " Remarks: " + adminRemarks : "");
 
+            String lifecycleAction = "STATUS_UPDATE";
+
             if (newStatus != null && (newStatus.equalsIgnoreCase("Validated") || newStatus.equalsIgnoreCase("Rejected"))) {
                 logCategory = "QA";
                 logAction = newStatus.equalsIgnoreCase("Validated") ? "REPORT_VALIDATED" : "REPORT_REJECTED";
+                lifecycleAction = newStatus.equalsIgnoreCase("Validated") ? "VALIDATED" : "REJECTED";
                 actor = resolveActor(explicitUserId, adminId);
             } else if (newStatus != null && newStatus.equalsIgnoreCase("In Progress") && adminRemarks != null && !adminRemarks.trim().isEmpty()) {
                 logCategory = "QA";
                 logAction = "REPAIR_REWORK_REQUESTED";
+                lifecycleAction = "REPAIR_REWORK_REQUESTED";
                 actor = resolveActor(explicitUserId, adminId);
             } else if (newStatus != null && (newStatus.equalsIgnoreCase("In Progress") || newStatus.equalsIgnoreCase("Completed"))) {
                 logCategory = "PROJECT";
                 logAction = newStatus.equalsIgnoreCase("In Progress") ? "REPAIR_IN_PROGRESS" : "REPAIR_COMPLETED";
+                lifecycleAction = newStatus.equalsIgnoreCase("In Progress") ? "IN_PROGRESS" : "COMPLETED";
                 actor = resolveActor(explicitUserId, ceoId);
             } else if (newStatus != null && (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved"))) {
                 logCategory = "QA";
                 logAction = "PROJECT_OFFICIALLY_CLOSED";
+                lifecycleAction = "CLOSED";
                 actor = resolveActor(explicitUserId, adminId);
             } else {
                 actor = resolveActor(explicitUserId, adminId);
             }
+
+            // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
+            reportStatusLogService.log(
+                    report,
+                    lifecycleAction,
+                    previousStatus,
+                    newStatus,
+                    adminRemarks,
+                    actor,
+                    "CPDO Admin",
+                    "ADMIN",
+                    report.getProofOfRepairImage()
+            );
 
             activityLogService.log(
                     actor,
@@ -359,6 +397,7 @@ public class RoadReportController {
                                           HttpServletRequest request) {
         try {
             RoadReport existingReport = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
+            String previousStatus = existingReport.getStatus();
 
             if (description != null) existingReport.setDamageDescription(description);
             if (length != null) existingReport.setLength(length);
@@ -386,18 +425,33 @@ public class RoadReportController {
                 }
             }
 
-            String currentStatus = existingReport.getStatus();
             boolean isResubmitted = false;
 
-            if (currentStatus != null && currentStatus.equalsIgnoreCase("Rejected")) {
+            if (previousStatus != null && previousStatus.equalsIgnoreCase("Rejected")) {
                 existingReport.setStatus("Resubmitted");
                 isResubmitted = true;
             } else {
                 existingReport.setStatus("Pending Validation");
             }
 
+            // Note: The previous rejection reason is now safely preserved in the audit log
             existingReport.setAdminRemarks(null);
             repository.save(existingReport);
+
+            User actor = (userId != null) ? userRepository.findById(userId).orElse(existingReport.getUser()) : existingReport.getUser();
+
+            // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
+            reportStatusLogService.log(
+                    existingReport,
+                    isResubmitted ? "RESUBMITTED" : "REPORT_UPDATED",
+                    previousStatus,
+                    existingReport.getStatus(),
+                    isResubmitted ? "Report revised and resubmitted with updated survey details." : "Report specifications updated.",
+                    actor,
+                    existingReport.getReportedBy(),
+                    "Barangay Official",
+                    existingReport.getDamageImage()
+            );
 
             if (isResubmitted) {
                 Long adminId = getAdminId();
@@ -409,7 +463,6 @@ public class RoadReportController {
                 );
             }
 
-            User actor = (userId != null) ? userRepository.findById(userId).orElse(existingReport.getUser()) : existingReport.getUser();
             activityLogService.log(
                     actor,
                     "PROJECT",
@@ -438,11 +491,26 @@ public class RoadReportController {
         try {
             List<RoadReport> allReports = repository.findAll();
             int dispatchedCount = 0;
+            User adminActor = resolveActor(userId, getAdminId());
 
             for (RoadReport report : allReports) {
                 if ("Validated".equalsIgnoreCase(report.getStatus().trim())) {
+                    String prev = report.getStatus();
                     report.setStatus("Dispatched to CEO");
                     dispatchedCount++;
+
+                    // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
+                    reportStatusLogService.log(
+                            report,
+                            "DISPATCHED",
+                            prev,
+                            "Dispatched to CEO",
+                            "Dispatched by CPDO to the City Engineer priority pool.",
+                            adminActor,
+                            "CPDO Admin",
+                            "ADMIN",
+                            null
+                    );
                 }
             }
 
@@ -471,7 +539,6 @@ public class RoadReportController {
                     });
                 }
 
-                User adminActor = resolveActor(userId, getAdminId());
                 activityLogService.log(
                         adminActor,
                         "PROJECT",
@@ -522,9 +589,25 @@ public class RoadReportController {
 
             if (reportsToDefer.isEmpty()) return ResponseEntity.status(404).body(Map.of("error", "Could not find the selected reports in the database."));
 
+            User ceoActor = resolveActor(explicitUserId, getCeoId());
+
             for (RoadReport r : reportsToDefer) {
+                String prev = r.getStatus();
                 r.setStatus("Pending Budget");
                 r.setRepairRemarks(reason);
+
+                // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
+                reportStatusLogService.log(
+                        r,
+                        "PENDING_BUDGET",
+                        prev,
+                        "Pending Budget",
+                        reason,
+                        ceoActor,
+                        "City Engineer",
+                        "ENGINEER",
+                        null
+                );
             }
 
             repository.saveAll(reportsToDefer);
@@ -558,7 +641,6 @@ public class RoadReportController {
                 sendBatchDeferEmail(entry.getKey(), entry.getValue(), reason);
             }
 
-            User ceoActor = resolveActor(explicitUserId, getCeoId());
             activityLogService.log(
                     ceoActor,
                     "PROJECT",
@@ -591,6 +673,7 @@ public class RoadReportController {
 
         try {
             RoadReport report = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
+            String previousStatus = report.getStatus();
 
             // ☁️ UPLOAD PROOF IMAGE DIRECTLY TO SUPABASE
             if (proofImage != null && !proofImage.isEmpty()) {
@@ -605,6 +688,21 @@ public class RoadReportController {
 
             sendStatusUpdateEmail(report, "Completed", repairRemarks);
 
+            User ceoActor = resolveActor(userId, getCeoId());
+
+            // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
+            reportStatusLogService.log(
+                    report,
+                    "COMPLETED",
+                    previousStatus,
+                    "Completed",
+                    repairRemarks,
+                    ceoActor,
+                    "City Engineer",
+                    "ENGINEER",
+                    report.getProofOfRepairImage()
+            );
+
             Long adminId = getAdminId();
             notificationService.sendNotification(
                     adminId,
@@ -613,7 +711,6 @@ public class RoadReportController {
                     "REPORT"
             );
 
-            User ceoActor = resolveActor(userId, getCeoId());
             activityLogService.log(
                     ceoActor,
                     "PROJECT",
@@ -643,6 +740,7 @@ public class RoadReportController {
             HttpServletRequest request) {
         try {
             RoadReport report = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
+            String previousStatus = report.getStatus();
 
             String reason = payload.get("repairRemarks");
             String passedUserIdStr = payload.get("userId");
@@ -653,6 +751,21 @@ public class RoadReportController {
             repository.save(report);
 
             sendStatusUpdateEmail(report, "Pending Budget", reason);
+
+            User ceoActor = resolveActor(explicitUserId, getCeoId());
+
+            // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
+            reportStatusLogService.log(
+                    report,
+                    "PENDING_BUDGET",
+                    previousStatus,
+                    "Pending Budget",
+                    reason,
+                    ceoActor,
+                    "City Engineer",
+                    "ENGINEER",
+                    null
+            );
 
             Long adminId = getAdminId();
             notificationService.sendNotification(
@@ -671,7 +784,6 @@ public class RoadReportController {
                 );
             }
 
-            User ceoActor = resolveActor(explicitUserId, getCeoId());
             activityLogService.log(
                     ceoActor,
                     "PROJECT",
@@ -803,17 +915,31 @@ public class RoadReportController {
 
             if (reportsToArchive.isEmpty()) return ResponseEntity.status(404).body(Map.of("error", "Could not find the selected reports in the database."));
 
+            User adminActor = resolveActor(explicitUserId, getAdminId());
             int archivedCount = 0;
             for (RoadReport r : reportsToArchive) {
                 if ("Pending Budget".equalsIgnoreCase(r.getStatus())) {
+                    String prev = r.getStatus();
                     r.setStatus("Archived");
                     archivedCount++;
+
+                    // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
+                    reportStatusLogService.log(
+                            r,
+                            "ARCHIVED",
+                            prev,
+                            "Archived",
+                            "Archived during CPDO batch housekeeping.",
+                            adminActor,
+                            "CPDO Admin",
+                            "ADMIN",
+                            null
+                    );
                 }
             }
 
             repository.saveAll(reportsToArchive);
 
-            User adminActor = resolveActor(explicitUserId, getAdminId());
             activityLogService.log(
                     adminActor,
                     "PROJECT",
@@ -831,17 +957,6 @@ public class RoadReportController {
         } catch (Exception e) {
             e.printStackTrace();
             return ResponseEntity.status(500).body(Map.of("error", "Error processing batch archive: " + e.getMessage()));
-        }
-    }
-
-    // ==========================================
-    // 🚀 WEBSOCKET BROADCASTER (LIVE REFRESH)
-    // ==========================================
-    private void sendLiveUpdate() {
-        try {
-            messagingTemplate.convertAndSend("/topic/updates", "REFRESH_DASHBOARDS");
-        } catch (Exception e) {
-            System.err.println("WebSocket Broadcast Failed: " + e.getMessage());
         }
     }
 
@@ -902,6 +1017,25 @@ public class RoadReportController {
             return ResponseEntity.status(500).body(Map.of(
                     "error", "Failed to complete annual rollover: " + e.getMessage()
             ));
+        }
+    }
+
+    // ==========================================
+    // 10. GET AUDIT TRAIL / TIMELINE (FOR ALL USERS)
+    // ==========================================
+    @GetMapping("/{id}/timeline")
+    public ResponseEntity<List<ReportStatusLog>> getReportTimeline(@PathVariable Long id) {
+        return ResponseEntity.ok(reportStatusLogService.getTimeline(id));
+    }
+
+    // ==========================================
+    // 🚀 WEBSOCKET BROADCASTER (LIVE REFRESH)
+    // ==========================================
+    private void sendLiveUpdate() {
+        try {
+            messagingTemplate.convertAndSend("/topic/updates", "REFRESH_DASHBOARDS");
+        } catch (Exception e) {
+            System.err.println("WebSocket Broadcast Failed: " + e.getMessage());
         }
     }
 

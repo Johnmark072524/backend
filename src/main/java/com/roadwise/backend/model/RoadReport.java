@@ -3,6 +3,7 @@ package com.roadwise.backend.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "reports")
@@ -49,6 +50,10 @@ public class RoadReport {
 
     @Column(columnDefinition = "TEXT")
     private String proofOfRepairImage;
+
+    // 🚀 OFFICIAL DATE CONCLUDED / ARCHIVED
+    @Column(name = "date_archived")
+    private LocalDateTime dateArchived;
 
     // AI Classification
     private String cvDamageClassification;
@@ -310,6 +315,14 @@ public class RoadReport {
 
     public void setDamageLength(Double damageLength) {
         this.damageLength = damageLength;
+    }
+
+    public LocalDateTime getDateArchived() {
+        return dateArchived;
+    }
+
+    public void setDateArchived(LocalDateTime dateArchived) {
+        this.dateArchived = dateArchived;
     }
 
     public Double getDamageWidth() {

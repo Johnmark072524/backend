@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 @Entity
 @Table(name = "report_status_logs")
@@ -54,7 +55,7 @@ public class ReportStatusLog {
     @PrePersist
     public void prePersist() {
         if (this.createdAt == null) {
-            this.createdAt = LocalDateTime.now();
+            this.createdAt = LocalDateTime.now(ZoneId.of("Asia/Manila"));
         }
     }
 
@@ -71,7 +72,7 @@ public class ReportStatusLog {
         this.actorName = actorName;
         this.actorRole = actorRole;
         this.attachmentUrl = attachmentUrl;
-        this.createdAt = LocalDateTime.now();
+        this.createdAt = LocalDateTime.now(ZoneId.of("Asia/Manila"));
     }
 
     // ==========================================

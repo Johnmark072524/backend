@@ -27,6 +27,8 @@ import org.springframework.web.multipart.MultipartFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.*;
 
 @RestController
@@ -252,6 +254,14 @@ public class RoadReportController {
 
             if (newStatus != null) {
                 report.setStatus(newStatus);
+
+                // 🎯 STAMP OFFICIAL CONCLUDED / ARCHIVED DATE IN PHILIPPINE STANDARD TIME (PST)
+                if (newStatus.equalsIgnoreCase("Closed") ||
+                        newStatus.equalsIgnoreCase("Resolved") ||
+                        newStatus.equalsIgnoreCase("Archived") ||
+                        newStatus.equalsIgnoreCase("Completed")) {
+                    report.setDateArchived(LocalDateTime.now(ZoneId.of("Asia/Manila")));
+                }
             }
 
             if (adminRemarks != null) {
@@ -684,6 +694,9 @@ public class RoadReportController {
             if (repairRemarks != null) report.setRepairRemarks(repairRemarks);
 
             report.setStatus("Completed");
+
+            // 🎯 STAMP DATE ARCHIVED IN PHILIPPINE STANDARD TIME (PST)
+            report.setDateArchived(LocalDateTime.now(ZoneId.of("Asia/Manila")));
             repository.save(report);
 
             sendStatusUpdateEmail(report, "Completed", repairRemarks);
@@ -921,6 +934,9 @@ public class RoadReportController {
                 if ("Pending Budget".equalsIgnoreCase(r.getStatus())) {
                     String prev = r.getStatus();
                     r.setStatus("Archived");
+
+                    // 🎯 STAMP DATE ARCHIVED IN PHILIPPINE STANDARD TIME (PST)
+                    r.setDateArchived(LocalDateTime.now(ZoneId.of("Asia/Manila")));
                     archivedCount++;
 
                     // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL

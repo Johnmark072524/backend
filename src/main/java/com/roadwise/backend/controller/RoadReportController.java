@@ -237,8 +237,8 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 2. THE EMAIL SWITCHBOARD & STATUS UPDATES (CPDO / CEO)
-    // ==========================================
+// 2. THE EMAIL SWITCHBOARD & STATUS UPDATES (CPDO / CEO)
+// ==========================================
     @PutMapping("/{id}/status")
     public ResponseEntity<String> updateReportStatus(
             @PathVariable Long id,
@@ -251,6 +251,11 @@ public class RoadReportController {
             String adminRemarks = payload.get("adminRemarks");
             String passedUserIdStr = payload.get("userId");
             Long explicitUserId = passedUserIdStr != null ? Long.valueOf(passedUserIdStr) : null;
+
+            // 🛡️ IDEMPOTENCY GUARD: Prevent duplicate execution from rapid double-clicks
+            if (newStatus != null && newStatus.equalsIgnoreCase(previousStatus)) {
+                return ResponseEntity.ok("ALREADY_UPDATED");
+            }
 
             if (newStatus != null) {
                 report.setStatus(newStatus);

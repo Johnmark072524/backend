@@ -27,6 +27,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.*;
@@ -237,8 +238,8 @@ public class RoadReportController {
     }
 
     // ==========================================
-// 2. THE EMAIL SWITCHBOARD & STATUS UPDATES (CPDO / CEO)
-// ==========================================
+    // 2. THE EMAIL SWITCHBOARD & STATUS UPDATES (CPDO / CEO)
+    // ==========================================
     @PutMapping("/{id}/status")
     public ResponseEntity<String> updateReportStatus(
             @PathVariable Long id,
@@ -252,6 +253,16 @@ public class RoadReportController {
             String passedUserIdStr = payload.get("userId");
             Long explicitUserId = passedUserIdStr != null ? Long.valueOf(passedUserIdStr) : null;
 
+            // 🎯 1. CAPTURE TARGET COMPLETION DATE (Logged during CEO dispatch)
+            String targetDateStr = payload.get("targetCompletionDate");
+            if (targetDateStr != null && !targetDateStr.trim().isEmpty()) {
+                try {
+                    report.setTargetCompletionDate(LocalDate.parse(targetDateStr.trim()));
+                } catch (Exception e) {
+                    System.err.println("Failed to parse target completion date: " + targetDateStr);
+                }
+            }
+
             // 🛡️ IDEMPOTENCY GUARD: Prevent duplicate execution from rapid double-clicks
             if (newStatus != null && newStatus.equalsIgnoreCase(previousStatus)) {
                 return ResponseEntity.ok("ALREADY_UPDATED");
@@ -260,12 +271,14 @@ public class RoadReportController {
             if (newStatus != null) {
                 report.setStatus(newStatus);
 
-                // 🎯 STAMP OFFICIAL CONCLUDED / ARCHIVED DATE IN PHILIPPINE STANDARD TIME (PST)
+                // 🎯 STAMP OFFICIAL CONCLUDED / ARCHIVED & ACTUAL COMPLETION DATE IN PHILIPPINE STANDARD TIME (PST)
                 if (newStatus.equalsIgnoreCase("Closed") ||
                         newStatus.equalsIgnoreCase("Resolved") ||
                         newStatus.equalsIgnoreCase("Archived") ||
                         newStatus.equalsIgnoreCase("Completed")) {
-                    report.setDateArchived(LocalDateTime.now(ZoneId.of("Asia/Manila")));
+                    LocalDateTime nowPst = LocalDateTime.now(ZoneId.of("Asia/Manila"));
+                    report.setDateArchived(nowPst);
+                    report.setActualCompletionDate(nowPst);
                 }
             }
 
@@ -449,7 +462,6 @@ public class RoadReportController {
                 existingReport.setStatus("Pending Validation");
             }
 
-            // Note: The previous rejection reason is now safely preserved in the audit log
             existingReport.setAdminRemarks(null);
             repository.save(existingReport);
 
@@ -700,8 +712,10 @@ public class RoadReportController {
 
             report.setStatus("Completed");
 
-            // 🎯 STAMP DATE ARCHIVED IN PHILIPPINE STANDARD TIME (PST)
-            report.setDateArchived(LocalDateTime.now(ZoneId.of("Asia/Manila")));
+            // 🎯 STAMP DATE ARCHIVED & ACTUAL COMPLETION DATE IN PHILIPPINE STANDARD TIME (PST)
+            LocalDateTime completionTime = LocalDateTime.now(ZoneId.of("Asia/Manila"));
+            report.setDateArchived(completionTime);
+            report.setActualCompletionDate(completionTime);
             repository.save(report);
 
             sendStatusUpdateEmail(report, "Completed", repairRemarks);

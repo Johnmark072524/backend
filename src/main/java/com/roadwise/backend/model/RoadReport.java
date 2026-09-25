@@ -55,6 +55,13 @@ public class RoadReport {
     @Column(name = "date_archived")
     private LocalDateTime dateArchived;
 
+    // 🎯 TIMELINE ESTIMATION & COMPLETION TRACKING
+    @Column(name = "target_completion_date")
+    private LocalDate targetCompletionDate;
+
+    @Column(name = "actual_completion_date")
+    private LocalDateTime actualCompletionDate;
+
     // AI Classification
     private String cvDamageClassification;
     private Double cvConfidenceScore;
@@ -317,6 +324,14 @@ public class RoadReport {
         this.damageLength = damageLength;
     }
 
+    public Double getDamageWidth() {
+        return damageWidth;
+    }
+
+    public void setDamageWidth(Double damageWidth) {
+        this.damageWidth = damageWidth;
+    }
+
     public LocalDateTime getDateArchived() {
         return dateArchived;
     }
@@ -325,11 +340,19 @@ public class RoadReport {
         this.dateArchived = dateArchived;
     }
 
-    public Double getDamageWidth() {
-        return damageWidth;
+    public LocalDate getTargetCompletionDate() {
+        return targetCompletionDate;
     }
 
-    public void setDamageWidth(Double damageWidth) {
-        this.damageWidth = damageWidth;
+    public void setTargetCompletionDate(LocalDate targetCompletionDate) {
+        this.targetCompletionDate = targetCompletionDate;
+    }
+
+    public LocalDateTime getActualCompletionDate() {
+        return actualCompletionDate;
+    }
+
+    public void setActualCompletionDate(LocalDateTime actualCompletionDate) {
+        this.actualCompletionDate = actualCompletionDate;
     }
 }

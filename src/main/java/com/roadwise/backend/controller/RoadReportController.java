@@ -1223,5 +1223,202 @@ public class RoadReportController {
         }
     }
 
+    // ==========================================
+    // 12. CEO: SUBMIT REQUEST FOR TIME EXTENSION
+    // ==========================================
+    @PostMapping("/{id}/request-extension")
+    public ResponseEntity<?> requestExtension(
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> payload,
+            HttpServletRequest request) {
+        try {
+            RoadReport report = repository.findById(id)
+                    .orElseThrow(() -> new RuntimeException("Report not found"));
+
+            String targetDateStr = (String) payload.get("extensionTargetDate");
+            String reason = (String) payload.get("extensionReason");
+            Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
+
+            if (targetDateStr == null || targetDateStr.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Proposed extension date is required."));
+            }
+            if (reason == null || reason.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Extension justification reason is required."));
+            }
+
+            LocalDate proposedDate;
+            try {
+                proposedDate = LocalDate.parse(targetDateStr.trim());
+            } catch (Exception e) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Invalid date format. Expected YYYY-MM-DD."));
+            }
+
+            // Verify proposed date is in the future relative to original target date
+            if (report.getTargetCompletionDate() != null && !proposedDate.isAfter(report.getTargetCompletionDate())) {
+                return ResponseEntity.badRequest().body(Map.of("error", "The requested date must be after the current target completion date (" + report.getTargetCompletionDate() + ")."));
+            }
+
+            report.setExtensionTargetDate(proposedDate);
+            report.setExtensionReason(reason.trim());
+            report.setExtensionStatus("PENDING");
+            repository.save(report);
+
+            User ceoActor = resolveActor(explicitUserId, getCeoId());
+            Long adminId = getAdminId();
+            String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
+
+            // 🔔 1. IN-APP NOTIFICATION TO CPDO ADMIN
+            notificationService.sendNotification(
+                    adminId,
+                    "⏱️ Extension Request: PRJ-" + String.format("%04d", report.getId()),
+                    "The CEO requested a deadline extension to " + proposedDate + " for " + safeRoadName + ". Justification: " + reason,
+                    "WARNING"
+            );
+
+            // 📋 2. LOG TO LIFECYCLE AUDIT TRAIL
+            reportStatusLogService.log(
+                    report,
+                    "EXTENSION_REQUESTED",
+                    report.getStatus(),
+                    report.getStatus(),
+                    "CEO filed a formal time extension request to " + proposedDate + ". Reason: " + reason,
+                    ceoActor,
+                    "City Engineer",
+                    "ENGINEER",
+                    null
+            );
+
+            // ⏱️ 3. SYSTEM ACTIVITY LOG
+            activityLogService.log(
+                    ceoActor,
+                    "PROJECT",
+                    "EXTENSION_REQUESTED",
+                    "#PRJ-" + String.format("%04d", report.getId()),
+                    "CEO requested schedule extension to " + proposedDate + " on " + safeRoadName + ". Reason: " + reason,
+                    "SUCCESS",
+                    request
+            );
+
+            sendLiveUpdate();
+
+            return ResponseEntity.ok(Map.of(
+                    "message", "Extension request successfully submitted for CPDO review.",
+                    "extensionTargetDate", proposedDate.toString(),
+                    "extensionStatus", "PENDING"
+            ));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body(Map.of("error", "Error submitting extension request: " + e.getMessage()));
+        }
+    }
+
+    // ==========================================
+    // 13. CPDO ADMIN: REVIEW TIME EXTENSION (APPROVE / REJECT)
+    // ==========================================
+    @PutMapping("/{id}/review-extension")
+    public ResponseEntity<?> reviewExtension(
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> payload,
+            HttpServletRequest request) {
+        try {
+            RoadReport report = repository.findById(id)
+                    .orElseThrow(() -> new RuntimeException("Report not found"));
+
+            String decision = (String) payload.get("decision"); // "APPROVED" or "REJECTED"
+            String adminRemarks = (String) payload.get("adminRemarks");
+            Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
+
+            if (decision == null || (!decision.equalsIgnoreCase("APPROVED") && !decision.equalsIgnoreCase("REJECTED"))) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Decision must be either 'APPROVED' or 'REJECTED'."));
+            }
+
+            if (!"PENDING".equalsIgnoreCase(report.getExtensionStatus())) {
+                return ResponseEntity.badRequest().body(Map.of("error", "There is no pending extension request for this project."));
+            }
+
+            boolean isApproved = decision.equalsIgnoreCase("APPROVED");
+            LocalDate oldTargetDate = report.getTargetCompletionDate();
+            LocalDate newTargetDate = report.getExtensionTargetDate();
+
+            if (isApproved) {
+                report.setTargetCompletionDate(newTargetDate);
+                report.setExtensionStatus("APPROVED");
+            } else {
+                report.setExtensionStatus("REJECTED");
+            }
+
+            repository.save(report);
+
+            User adminActor = resolveActor(explicitUserId, getAdminId());
+            Long ceoId = getCeoId();
+            String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
+
+            // 🔔 1. NOTIFY CEO (IN-APP + EMAIL)
+            if (ceoId != null) {
+                String title = isApproved ? "✅ Time Extension Approved" : "❌ Time Extension Rejected";
+                String msg = isApproved
+                        ? "CPDO Admin approved your extension request for PRJ-" + String.format("%04d", report.getId()) + ". New target date: " + newTargetDate + "."
+                        : "CPDO Admin rejected your extension request for PRJ-" + String.format("%04d", report.getId()) + "." + (adminRemarks != null && !adminRemarks.trim().isEmpty() ? " Remarks: " + adminRemarks : "");
+
+                notificationService.sendNotification(ceoId, title, msg, isApproved ? "REPORT" : "WARNING");
+
+                userRepository.findById(ceoId).ifPresent(ceo -> {
+                    if (ceo.getEmail() != null && !ceo.getEmail().trim().isEmpty()) {
+                        String subject = "RoadWise: " + title + " [PRJ-" + String.format("%04d", report.getId()) + "]";
+                        String body = "Hello " + ceo.getFirstName() + ",\n\n" +
+                                "Your formal request for a time extension on " + safeRoadName + " (PRJ-" + String.format("%04d", report.getId()) + ") has been " + (isApproved ? "APPROVED" : "REJECTED") + " by the CPDO Admin.\n\n" +
+                                (isApproved ? "• New Target Completion Date: " + newTargetDate + "\n" : "• Original Target Completion Date remains: " + oldTargetDate + "\n") +
+                                (adminRemarks != null && !adminRemarks.trim().isEmpty() ? "• Admin Remarks: " + adminRemarks + "\n\n" : "\n") +
+                                "Please log into the Engineering Dashboard for updated project tracking.\n\n" +
+                                "Best regards,\nRoadWise CPDO Administration";
+                        emailService.sendEmail(ceo.getEmail(), subject, body);
+                    }
+                });
+            }
+
+            // 📋 2. LOG TO LIFECYCLE AUDIT TRAIL
+            String actionLog = isApproved ? "EXTENSION_APPROVED" : "EXTENSION_REJECTED";
+            String logRemarks = isApproved
+                    ? "CPDO Admin approved extension to " + newTargetDate + " (Previous: " + oldTargetDate + ")." + (adminRemarks != null ? " Remarks: " + adminRemarks : "")
+                    : "CPDO Admin rejected extension request." + (adminRemarks != null ? " Remarks: " + adminRemarks : "");
+
+            reportStatusLogService.log(
+                    report,
+                    actionLog,
+                    report.getStatus(),
+                    report.getStatus(),
+                    logRemarks,
+                    adminActor,
+                    "CPDO Admin",
+                    "ADMIN",
+                    null
+            );
+
+            // ⏱️ 3. SYSTEM ACTIVITY LOG
+            activityLogService.log(
+                    adminActor,
+                    "QA",
+                    actionLog,
+                    "#PRJ-" + String.format("%04d", report.getId()),
+                    logRemarks,
+                    "SUCCESS",
+                    request
+            );
+
+            sendLiveUpdate();
+
+            return ResponseEntity.ok(Map.of(
+                    "message", "Extension request " + (isApproved ? "approved" : "rejected") + " successfully.",
+                    "extensionStatus", report.getExtensionStatus(),
+                    "targetCompletionDate", report.getTargetCompletionDate() != null ? report.getTargetCompletionDate().toString() : ""
+            ));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body(Map.of("error", "Error reviewing extension request: " + e.getMessage()));
+        }
+    }
+
 
 }

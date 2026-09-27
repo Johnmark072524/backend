@@ -98,6 +98,17 @@ public class RoadReport {
     @Column(name = "last_reminder_sent")
     private LocalDateTime lastReminderSent;
 
+    // ⏱️ FORMAL CIVIL WORKS TIME EXTENSION REQUEST FIELDS
+    @Column(name = "extension_target_date")
+    private LocalDate extensionTargetDate;
+
+    @Column(name = "extension_reason", length = 1000)
+    private String extensionReason;
+
+    // Status: null, "PENDING", "APPROVED", "REJECTED"
+    @Column(name = "extension_status")
+    private String extensionStatus;
+
     public RoadReport() {
     }
 
@@ -274,6 +285,30 @@ public class RoadReport {
 
     public void setLastReminderSent(LocalDateTime lastReminderSent) {
         this.lastReminderSent = lastReminderSent;
+    }
+
+    public LocalDate getExtensionTargetDate() {
+        return extensionTargetDate;
+    }
+
+    public void setExtensionTargetDate(LocalDate extensionTargetDate) {
+        this.extensionTargetDate = extensionTargetDate;
+    }
+
+    public String getExtensionReason() {
+        return extensionReason;
+    }
+
+    public void setExtensionReason(String extensionReason) {
+        this.extensionReason = extensionReason;
+    }
+
+    public String getExtensionStatus() {
+        return extensionStatus;
+    }
+
+    public void setExtensionStatus(String extensionStatus) {
+        this.extensionStatus = extensionStatus;
     }
 
     public void setBarangay(Barangay barangay) {

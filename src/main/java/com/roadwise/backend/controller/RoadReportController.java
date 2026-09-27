@@ -1098,4 +1098,130 @@ public class RoadReportController {
             return ResponseEntity.notFound().build();
         }
     }
+
+    // ==========================================
+    // 11. CPDO ADMIN: ISSUE DEADLINE REMINDER / EXPEDITE NOTICE
+    // ==========================================
+    @PostMapping("/{id}/remind-due")
+    public ResponseEntity<?> sendDeadlineReminder(
+            @PathVariable Long id,
+            @RequestBody(required = false) Map<String, Object> payload,
+            HttpServletRequest request) {
+        try {
+            RoadReport report = repository.findById(id)
+                    .orElseThrow(() -> new RuntimeException("Report not found"));
+
+            if (report.getTargetCompletionDate() == null) {
+                return ResponseEntity.badRequest().body(Map.of("error", "This project has no scheduled target completion date."));
+            }
+
+            LocalDateTime nowPst = LocalDateTime.now(ZoneId.of("Asia/Manila"));
+            LocalDate todayPst = nowPst.toLocalDate();
+
+            // 🛡️ ANTI-SPAM 12-HOUR COOLDOWN CHECK (Option A)
+            if (report.getLastReminderSent() != null) {
+                LocalDateTime cooldownExpires = report.getLastReminderSent().plusHours(12);
+                if (nowPst.isBefore(cooldownExpires)) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "A reminder was already issued recently today. Please wait for the 12-hour cooldown period.",
+                            "lastReminderSent", report.getLastReminderSent().toString()
+                    ));
+                }
+            }
+
+            // Calculate days difference (Target Date vs Today)
+            long daysDiff = report.getTargetCompletionDate().toEpochDay() - todayPst.toEpochDay();
+            String urgencyLabel;
+            String notifTitle;
+            String notifType;
+
+            if (daysDiff < 0) {
+                long overdueDays = Math.abs(daysDiff);
+                urgencyLabel = "🚨 OVERDUE NOTICE (" + overdueDays + " day" + (overdueDays > 1 ? "s" : "") + " late)";
+                notifTitle = "🚨 Urgent: Repair Overdue Notice";
+                notifType = "CRITICAL";
+            } else if (daysDiff == 0) {
+                urgencyLabel = "⚠️ DUE TODAY";
+                notifTitle = "⚠️ Action Required: Repair Due Today";
+                notifType = "WARNING";
+            } else {
+                urgencyLabel = "⏳ UPCOMING DEADLINE (" + daysDiff + " day" + (daysDiff > 1 ? "s" : "") + " remaining)";
+                notifTitle = "⏳ Reminder: Impending Repair Deadline";
+                notifType = "REPORT";
+            }
+
+            // Update timestamp & persist
+            report.setLastReminderSent(nowPst);
+            repository.save(report);
+
+            // Resolve Admin User
+            Long explicitUserId = (payload != null && payload.get("userId") != null)
+                    ? Long.valueOf(payload.get("userId").toString())
+                    : null;
+            User adminActor = resolveActor(explicitUserId, getAdminId());
+
+            // 🔔 1. IN-APP NOTIFICATION TO CEO
+            Long ceoId = getCeoId();
+            String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
+            String notifMsg = "CPDO Admin has flagged PRJ-" + String.format("%04d", report.getId()) + " (" + safeRoadName + "). Status: " + urgencyLabel + ". Please prioritize site completion or report progress.";
+
+            if (ceoId != null) {
+                notificationService.sendNotification(ceoId, notifTitle, notifMsg, notifType);
+
+                // 📧 2. OFFICIAL EMAIL TO CEO
+                userRepository.findById(ceoId).ifPresent(ceo -> {
+                    if (ceo.getEmail() != null && !ceo.getEmail().trim().isEmpty()) {
+                        String emailSubject = "RoadWise Alert: " + notifTitle + " [PRJ-" + String.format("%04d", report.getId()) + "]";
+                        String emailBody = "Hello " + ceo.getFirstName() + ",\n\n" +
+                                "The CPDO Admin has reviewed project schedules and issued a deadline notification regarding:\n\n" +
+                                "• Project ID: #PRJ-" + String.format("%04d", report.getId()) + "\n" +
+                                "• Road Name: " + safeRoadName + "\n" +
+                                "• Target Completion Date: " + report.getTargetCompletionDate() + "\n" +
+                                "• Current Urgency: " + urgencyLabel + "\n\n" +
+                                "Please ensure crews are deployed or provide updated progress remarks in your engineering dashboard.\n\n" +
+                                "Best regards,\nRoadWise CPDO Administration";
+                        emailService.sendEmail(ceo.getEmail(), emailSubject, emailBody);
+                    }
+                });
+            }
+
+            // 📋 3. LOG TO STATUS LIFECYCLE AUDIT TRAIL
+            reportStatusLogService.log(
+                    report,
+                    "DEADLINE_REMINDER_ISSUED",
+                    report.getStatus(),
+                    report.getStatus(),
+                    "CPDO Admin issued an expedite/deadline reminder to the City Engineer (" + urgencyLabel + ").",
+                    adminActor,
+                    "CPDO Admin",
+                    "ADMIN",
+                    null
+            );
+
+            // ⏱️ 4. LOG TO SYSTEM ACTIVITY LOG
+            activityLogService.log(
+                    adminActor,
+                    "PROJECT",
+                    "DEADLINE_REMINDER_SENT",
+                    "#PRJ-" + String.format("%04d", report.getId()),
+                    "Admin sent " + urgencyLabel + " to CEO for " + safeRoadName + ".",
+                    "SUCCESS",
+                    request
+            );
+
+            // 🚀 5. WEBSOCKET BROADCAST
+            sendLiveUpdate();
+
+            return ResponseEntity.ok(Map.of(
+                    "message", "Deadline reminder successfully issued to the City Engineer.",
+                    "lastReminderSent", nowPst.toString()
+            ));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body(Map.of("error", "Error issuing deadline reminder: " + e.getMessage()));
+        }
+    }
+
+
 }

@@ -94,6 +94,10 @@ public class RoadReport {
         }
     }
 
+    // 🔔 ANTI-SPAM RATE-LIMITING FOR DEADLINE REMINDERS
+    @Column(name = "last_reminder_sent")
+    private LocalDateTime lastReminderSent;
+
     public RoadReport() {
     }
 
@@ -262,6 +266,14 @@ public class RoadReport {
 
     public Barangay getBarangay() {
         return barangay;
+    }
+
+    public LocalDateTime getLastReminderSent() {
+        return lastReminderSent;
+    }
+
+    public void setLastReminderSent(LocalDateTime lastReminderSent) {
+        this.lastReminderSent = lastReminderSent;
     }
 
     public void setBarangay(Barangay barangay) {

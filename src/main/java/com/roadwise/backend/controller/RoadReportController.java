@@ -263,6 +263,22 @@ public class RoadReportController {
                 }
             }
 
+            // 🛡️ OPTION A: AUTO-ARCHIVE REPORTS WITHOUT PHOTO DAMAGE EVIDENCE UPON VALIDATION
+            boolean isAutoArchivedNoDamage = false;
+            if (newStatus != null && newStatus.equalsIgnoreCase("Validated")) {
+                boolean hasNoDamageImage = report.getDamageImage() == null ||
+                        report.getDamageImage().trim().isEmpty() ||
+                        report.getDamageImage().trim().equalsIgnoreCase("no_image.jpg");
+
+                if (hasNoDamageImage) {
+                    newStatus = "Archived";
+                    isAutoArchivedNoDamage = true;
+                    if (adminRemarks == null || adminRemarks.trim().isEmpty()) {
+                        adminRemarks = "Inspected by CPDO: No physical road damage detected. Ticket archived as 'No Action Required'.";
+                    }
+                }
+            }
+
             // 🛡️ IDEMPOTENCY GUARD: Prevent duplicate execution from rapid double-clicks
             if (newStatus != null && newStatus.equalsIgnoreCase(previousStatus)) {
                 return ResponseEntity.ok("ALREADY_UPDATED");
@@ -312,13 +328,16 @@ public class RoadReportController {
                                 "REPORT"
                         );
 
+                        // 🔒 CAPTURE EFFECTIVELY FINAL STRING FOR LAMBDA
+                        final String reworkRemarks = adminRemarks;
+
                         userRepository.findById(ceoId).ifPresent(ceo -> {
                             if (ceo.getEmail() != null && !ceo.getEmail().isEmpty()) {
                                 String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
                                 String subject = "RoadWise Alert: Repair Rework Required for PRJ-" + report.getId();
                                 String body = "Hello " + ceo.getFirstName() + ",\n\n" +
                                         "The CPDO Admin has reviewed the proof of repair for " + safeRoadName + " (PRJ-" + report.getId() + ") and has requested a rework.\n\n" +
-                                        "Admin Remarks: " + adminRemarks + "\n\n" +
+                                        "Admin Remarks: " + reworkRemarks + "\n\n" +
                                         "The project has been returned to your active queue. Please deploy the crew to address the feedback and upload new proof once completed.\n\n" +
                                         "Best regards,\nRoadWise SJDM System";
                                 emailService.sendEmail(ceo.getEmail(), subject, body);
@@ -331,14 +350,21 @@ public class RoadReportController {
                     Long brgyUserId = report.getUser().getId();
                     String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
 
-                    if (newStatus.equalsIgnoreCase("Validated")) {
+                    if (isAutoArchivedNoDamage) {
+                        notificationService.sendNotification(
+                                brgyUserId,
+                                "Report Inspected & Archived",
+                                "CPDO reviewed Report #PRJ-" + report.getId() + " for " + safeRoadName + ". No photographic damage was found; ticket has been archived as 'Good Condition'.",
+                                "REPORT"
+                        );
+                    } else if (newStatus.equalsIgnoreCase("Validated")) {
                         notificationService.sendNotification(brgyUserId, "Report Validated", "Good news! Report #PRJ-" + report.getId() + " for " + safeRoadName + " has been validated by the CPDO.", "REPORT");
                     } else if (newStatus.equalsIgnoreCase("Rejected")) {
                         String reason = (adminRemarks != null && !adminRemarks.isEmpty()) ? adminRemarks : "Review remarks for details.";
                         notificationService.sendNotification(brgyUserId, "Report Rejected", "Report #PRJ-" + report.getId() + " requires corrections. Reason: " + reason, "REPORT");
                     } else if (newStatus.equalsIgnoreCase("In Progress")) {
                         notificationService.sendNotification(brgyUserId, "Repair In Progress", "The City Engineering Office (CEO) is actively working on " + safeRoadName + " (ID: PRJ-" + report.getId() + ").", "REPORT");
-                    } else if (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved")) {
+                    } else if (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved") || newStatus.equalsIgnoreCase("Archived")) {
                         notificationService.sendNotification(brgyUserId, "Project Officially Closed", "Success! The repair for #PRJ-" + report.getId() + " on " + safeRoadName + " has been verified and officially closed.", "REPORT");
                     }
                 }
@@ -347,12 +373,19 @@ public class RoadReportController {
             User actor;
             String logCategory = "PROJECT";
             String logAction = "STATUS_UPDATED_" + (newStatus != null ? newStatus.toUpperCase().replace(" ", "_") : "UNKNOWN");
-            String logDesc = "Project status transitioned to '" + newStatus + "' on " + report.getCityRoadName() + "." +
-                    (adminRemarks != null && !adminRemarks.trim().isEmpty() ? " Remarks: " + adminRemarks : "");
+            String logDesc = isAutoArchivedNoDamage
+                    ? "CPDO inspected report without damage evidence. Ticket archived as 'No Action Required'."
+                    : "Project status transitioned to '" + newStatus + "' on " + report.getCityRoadName() + "." +
+                      (adminRemarks != null && !adminRemarks.trim().isEmpty() ? " Remarks: " + adminRemarks : "");
 
             String lifecycleAction = "STATUS_UPDATE";
 
-            if (newStatus != null && (newStatus.equalsIgnoreCase("Validated") || newStatus.equalsIgnoreCase("Rejected"))) {
+            if (isAutoArchivedNoDamage) {
+                logCategory = "QA";
+                logAction = "REPORT_INSPECTED_NO_DAMAGE";
+                lifecycleAction = "ARCHIVED_NO_DAMAGE";
+                actor = resolveActor(explicitUserId, adminId);
+            } else if (newStatus != null && (newStatus.equalsIgnoreCase("Validated") || newStatus.equalsIgnoreCase("Rejected"))) {
                 logCategory = "QA";
                 logAction = newStatus.equalsIgnoreCase("Validated") ? "REPORT_VALIDATED" : "REPORT_REJECTED";
                 lifecycleAction = newStatus.equalsIgnoreCase("Validated") ? "VALIDATED" : "REJECTED";
@@ -367,7 +400,7 @@ public class RoadReportController {
                 logAction = newStatus.equalsIgnoreCase("In Progress") ? "REPAIR_IN_PROGRESS" : "REPAIR_COMPLETED";
                 lifecycleAction = newStatus.equalsIgnoreCase("In Progress") ? "IN_PROGRESS" : "COMPLETED";
                 actor = resolveActor(explicitUserId, ceoId);
-            } else if (newStatus != null && (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved"))) {
+            } else if (newStatus != null && (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved") || newStatus.equalsIgnoreCase("Archived"))) {
                 logCategory = "QA";
                 logAction = "PROJECT_OFFICIALLY_CLOSED";
                 lifecycleAction = "CLOSED";
@@ -400,7 +433,7 @@ public class RoadReportController {
             );
 
             sendLiveUpdate();
-            return ResponseEntity.ok("SUCCESS");
+            return ResponseEntity.ok(isAutoArchivedNoDamage ? "ARCHIVED_NO_IMAGE" : "SUCCESS");
 
         }).orElse(ResponseEntity.notFound().build());
     }
@@ -522,22 +555,50 @@ public class RoadReportController {
 
             for (RoadReport report : allReports) {
                 if ("Validated".equalsIgnoreCase(report.getStatus().trim())) {
-                    String prev = report.getStatus();
-                    report.setStatus("Dispatched to CEO");
-                    dispatchedCount++;
+                    boolean hasValidImage = report.getDamageImage() != null &&
+                            !report.getDamageImage().trim().isEmpty() &&
+                            !report.getDamageImage().trim().equalsIgnoreCase("no_image.jpg");
 
-                    // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
-                    reportStatusLogService.log(
-                            report,
-                            "DISPATCHED",
-                            prev,
-                            "Dispatched to CEO",
-                            "Dispatched by CPDO to the City Engineer priority pool.",
-                            adminActor,
-                            "CPDO Admin",
-                            "ADMIN",
-                            null
-                    );
+                    if (hasValidImage) {
+                        String prev = report.getStatus();
+                        report.setStatus("Dispatched to CEO");
+                        dispatchedCount++;
+
+                        // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
+                        reportStatusLogService.log(
+                                report,
+                                "DISPATCHED",
+                                prev,
+                                "Dispatched to CEO",
+                                "Dispatched by CPDO to the City Engineer priority pool.",
+                                adminActor,
+                                "CPDO Admin",
+                                "ADMIN",
+                                null
+                        );
+                    } else {
+                        // 🛡️ Safety fallback: Auto-archive any legacy validated report lacking photo evidence
+                        String prev = report.getStatus();
+                        report.setStatus("Archived");
+                        LocalDateTime nowPst = LocalDateTime.now(ZoneId.of("Asia/Manila"));
+                        report.setDateArchived(nowPst);
+                        report.setActualCompletionDate(nowPst);
+                        if (report.getAdminRemarks() == null || report.getAdminRemarks().trim().isEmpty()) {
+                            report.setAdminRemarks("Auto-archived during dispatch: No photographic damage evidence.");
+                        }
+
+                        reportStatusLogService.log(
+                                report,
+                                "ARCHIVED_NO_DAMAGE",
+                                prev,
+                                "Archived",
+                                "Auto-archived during dispatch filter: No photographic damage evidence.",
+                                adminActor,
+                                "CPDO Admin",
+                                "ADMIN",
+                                null
+                        );
+                    }
                 }
             }
 
@@ -579,6 +640,8 @@ public class RoadReportController {
                 sendLiveUpdate();
                 return ResponseEntity.ok("Successfully dispatched " + finalDispatchedCount + " prioritized reports to the CEO!");
             } else {
+                repository.saveAll(allReports); // Persist any no-image reports that were auto-archived
+                sendLiveUpdate();
                 return ResponseEntity.badRequest().body("No 'Validated' reports found to dispatch.");
             }
         } catch (Exception e) {
@@ -861,6 +924,10 @@ public class RoadReportController {
                 break;
             case "validated":
                 body.append("Great job! The CPDO has successfully validated your report. It is now awaiting dispatch to the CEO Priority List.\n");
+                break;
+            case "archived":
+                subject = "RoadWise Update: Report Inspected & Archived";
+                body.append("The CPDO has inspected this road report. Because no physical road damage or hazards were detected, this ticket has been officially archived as 'Passable / Good Condition'.\n");
                 break;
             case "in progress":
                 subject = "RoadWise Update: Repair In Progress";
@@ -1419,6 +1486,5 @@ public class RoadReportController {
             return ResponseEntity.status(500).body(Map.of("error", "Error reviewing extension request: " + e.getMessage()));
         }
     }
-
 
 }

@@ -213,6 +213,9 @@ public class AuthController {
         responseData.put("userId", user.getId());
         responseData.put("message", "A 6-digit code has been sent to your email.");
 
+        // 🚀 DEMO ONLY: Attach the OTP so the frontend can display it
+        responseData.put("demoOtp", otp);
+
         return ResponseEntity.ok(responseData);
     }
 

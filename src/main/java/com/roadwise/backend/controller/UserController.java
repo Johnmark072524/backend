@@ -9,6 +9,7 @@ import com.roadwise.backend.service.NotificationService;
 import com.roadwise.backend.service.SupabaseStorageService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -42,6 +43,10 @@ public class UserController {
     // 🚀 INJECTED SUPABASE CLOUD STORAGE SERVICE
     @Autowired
     private SupabaseStorageService supabaseStorageService;
+
+    // 🌐 DYNAMIC FRONTEND DOMAIN INJECTION
+    @Value("${frontend.url:https://roadwise-csjdm.com}")
+    private String frontendUrl;
 
     // ==========================================
     // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
@@ -280,7 +285,7 @@ public class UserController {
                     "Your official RoadWise Barangay Official account has been provisioned.\n\n" +
                     "Username: " + savedUser.getUsername() + "\n" +
                     "Temporary Password: " + savedUser.getPassword() + "\n\n" +
-                    "Please log in here: https://frontend-capstone-fawn.vercel.app/login.html\n\n" +
+                    "Please log in here: " + frontendUrl + "/login.html\n\n" +
                     "For security purposes, please change your password immediately after logging in.\n\n" +
                     "Best regards,\nCPDO Administrator - RoadWise SJDM";
 
@@ -446,7 +451,7 @@ public class UserController {
         String newEmail = payload.get("email");
         String newUsername = payload.get("username");
         String newPhone = payload.get("phoneNumber");
-        String memoNumber = payload.get("memoNumber"); // e.g. "EO-2026-04"
+        String memoNumber = payload.get("memoNumber");
 
         if (currentAdminIdStr == null || currentPassword == null) {
             return ResponseEntity.badRequest().body(Map.of("error", "Current administrator credentials are required."));
@@ -528,6 +533,7 @@ public class UserController {
                     "Login Credentials:\n" +
                     "• Username: " + savedNewAdmin.getUsername() + "\n" +
                     "• Temporary Password: " + tempPassword + "\n\n" +
+                    "Please log in here: " + frontendUrl + "/login.html\n\n" +
                     "Please log in and update your security credentials.\n\n" +
                     "Best regards,\nRoadWise Administration - City of San Jose del Monte";
             try {
@@ -537,7 +543,7 @@ public class UserController {
             }
         }
 
-        // 8. RETURN RESPONSE (Includes temp credentials for demo convenience)
+        // 8. RETURN RESPONSE
         Map<String, Object> responseData = new HashMap<>();
         responseData.put("message", "Administrative office successfully turned over!");
         responseData.put("successorName", savedNewAdmin.getFirstName() + " " + savedNewAdmin.getLastName());
@@ -603,7 +609,7 @@ public class UserController {
         // 🛡️ 3. GENERATE SECURE TEMPORARY CREDENTIALS
         String tempPassword = "RoadWise@" + (1000 + new Random().nextInt(9000)) + "!";
 
-        // 4. PROVISION INCOMING SUCCESSOR (Inherits current CEO role)
+        // 4. PROVISION INCOMING SUCCESSOR
         User newCeo = new User();
         newCeo.setFirstName(newFirstName != null ? newFirstName.trim() : "");
         newCeo.setMiddleName(newMiddleName != null ? newMiddleName.trim() : "");
@@ -645,6 +651,7 @@ public class UserController {
                     "Login Credentials:\n" +
                     "• Username: " + savedNewCeo.getUsername() + "\n" +
                     "• Temporary Password: " + tempPassword + "\n\n" +
+                    "Please log in here: " + frontendUrl + "/login.html\n\n" +
                     "Please log in and update your security credentials.\n\n" +
                     "Best regards,\nCity Engineering Office - City of San Jose del Monte";
             try {
@@ -654,7 +661,7 @@ public class UserController {
             }
         }
 
-        // 8. RETURN RESPONSE (With demo credentials)
+        // 8. RETURN RESPONSE
         Map<String, Object> responseData = new HashMap<>();
         responseData.put("message", "City Engineering Office successfully turned over!");
         responseData.put("successorName", savedNewCeo.getFirstName() + " " + savedNewCeo.getLastName());
@@ -663,5 +670,4 @@ public class UserController {
 
         return ResponseEntity.ok(responseData);
     }
-
 }

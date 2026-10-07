@@ -370,4 +370,58 @@ public class AuthController {
 
         return ResponseEntity.ok(Map.of("message", "Password successfully reset! You can now log in."));
     }
+
+    // ==========================================
+    // 7. SERVER-SIDE SESSION VERIFICATION
+    // ==========================================
+    @PostMapping("/verify-session")
+    public ResponseEntity<?> verifySession(@RequestBody Map<String, Object> payload, HttpServletRequest request) {
+        Object rawId = payload.get("userId");
+        String claimedRole = (String) payload.get("role");
+
+        if (rawId == null || claimedRole == null) {
+            return ResponseEntity.status(401).body(Map.of("valid", false, "error", "Missing session identity."));
+        }
+
+        Long userId;
+        try {
+            userId = Long.valueOf(rawId.toString());
+        } catch (NumberFormatException e) {
+            return ResponseEntity.status(401).body(Map.of("valid", false, "error", "Invalid user ID format."));
+        }
+
+        Optional<User> userOpt = userRepository.findById(userId);
+        if (userOpt.isEmpty()) {
+            return ResponseEntity.status(401).body(Map.of("valid", false, "error", "User record no longer exists."));
+        }
+
+        User user = userOpt.get();
+
+        // 🛡️ Enforce Account Status Restrictions
+        if ("Suspended".equalsIgnoreCase(user.getStatus()) || "Deactivated".equalsIgnoreCase(user.getStatus())) {
+            return ResponseEntity.status(403).body(Map.of("valid", false, "error", "Account access revoked."));
+        }
+
+        // 🛡️ Prevent Role Spoofing (e.g., Barangay user changing role to Admin in DevTools)
+        if (!user.getRole().equalsIgnoreCase(claimedRole)) {
+            activityLogService.log(
+                    user,
+                    "SECURITY",
+                    "ROLE_SPOOF_ATTEMPT",
+                    String.format("#USR-%04d", user.getId()),
+                    "Client role mismatch detected. Claimed: '" + claimedRole + "', Actual DB: '" + user.getRole() + "'.",
+                    "WARNING",
+                    request
+            );
+            return ResponseEntity.status(403).body(Map.of("valid", false, "error", "Role mismatch detected."));
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("valid", true);
+        result.put("role", user.getRole());
+        result.put("status", user.getStatus());
+
+        return ResponseEntity.ok(result);
+    }
+
 }

@@ -429,4 +429,239 @@ public class UserController {
 
         return ResponseEntity.ok(Map.of("message", "Password successfully reset to default."));
     }
+
+    // ==========================================
+    // 9. CPDO ADMIN: FORMAL OFFICE TURNOVER / SUCCESSION
+    // ==========================================
+    @PostMapping("/handover-admin")
+    public ResponseEntity<?> handoverAdminOffice(
+            @RequestBody Map<String, String> payload,
+            HttpServletRequest request) {
+
+        String currentAdminIdStr = payload.get("currentAdminId");
+        String currentPassword = payload.get("currentPassword");
+        String newFirstName = payload.get("firstName");
+        String newMiddleName = payload.get("middleName");
+        String newLastName = payload.get("lastName");
+        String newEmail = payload.get("email");
+        String newUsername = payload.get("username");
+        String newPhone = payload.get("phoneNumber");
+        String memoNumber = payload.get("memoNumber"); // e.g. "EO-2026-04"
+
+        if (currentAdminIdStr == null || currentPassword == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Current administrator credentials are required."));
+        }
+
+        Long currentAdminId = Long.valueOf(currentAdminIdStr);
+        Optional<User> currentAdminOpt = userRepository.findById(currentAdminId);
+        if (currentAdminOpt.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of("error", "Current administrator account not found."));
+        }
+
+        User currentAdmin = currentAdminOpt.get();
+
+        // 🛡️ 1. SECURITY CHECK: Verify Outgoing Admin Password
+        if (!currentAdmin.getPassword().equals(currentPassword)) {
+            activityLogService.log(
+                    currentAdmin,
+                    "SECURITY",
+                    "ADMIN_HANDOVER_UNAUTHORIZED",
+                    "#USR-" + currentAdmin.getId(),
+                    "Unauthorized turnover attempt: Incorrect current password submitted.",
+                    "FAILED",
+                    request
+            );
+            return ResponseEntity.status(401).body(Map.of("error", "Incorrect current password. Turnover authorization rejected."));
+        }
+
+        // 🛡️ 2. UNIQUE CONFLICT CHECKS
+        if (userRepository.findByUsername(newUsername).isPresent()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Username '" + newUsername + "' is already taken."));
+        }
+
+        if (userRepository.findByEmail(newEmail).isPresent()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Official email '" + newEmail + "' is already registered to another user."));
+        }
+
+        // 🛡️ 3. GENERATE SECURE TEMPORARY CREDENTIALS
+        String tempPassword = "RoadWise@" + (1000 + new Random().nextInt(9000)) + "!";
+
+        // 4. PROVISION INCOMING SUCCESSOR
+        User newAdmin = new User();
+        newAdmin.setFirstName(newFirstName != null ? newFirstName.trim() : "");
+        newAdmin.setMiddleName(newMiddleName != null ? newMiddleName.trim() : "");
+        newAdmin.setLastName(newLastName != null ? newLastName.trim() : "");
+        newAdmin.setEmail(newEmail != null ? newEmail.trim() : "");
+        newAdmin.setUsername(newUsername != null ? newUsername.trim() : "");
+        newAdmin.setPhoneNumber(newPhone != null ? newPhone.trim() : "");
+        newAdmin.setPassword(tempPassword);
+        newAdmin.setRole("CPDO Admin");
+        newAdmin.setStatus("Active");
+        newAdmin.setFailedLoginAttempts(0);
+        newAdmin.setProfilePicture("no_image.jpg");
+
+        User savedNewAdmin = userRepository.save(newAdmin);
+
+        // 5. DEACTIVATE OUTGOING PREDECESSOR (Preserve audit integrity)
+        currentAdmin.setStatus("Deactivated");
+        userRepository.save(currentAdmin);
+
+        // 📋 6. WRITE PERMANENT SYSTEM ACTIVITY LOG
+        String memoText = (memoNumber != null && !memoNumber.trim().isEmpty()) ? " [Memo Ref: " + memoNumber.trim() + "]" : "";
+        activityLogService.log(
+                currentAdmin,
+                "AUTH",
+                "OFFICIAL_OFFICE_TURNOVER",
+                "#USR-" + savedNewAdmin.getId(),
+                "CPDO Admin " + currentAdmin.getFirstName() + " " + currentAdmin.getLastName() +
+                        " officially turned over administrative office to " + savedNewAdmin.getFirstName() + " " + savedNewAdmin.getLastName() + memoText + ".",
+                "SUCCESS",
+                request
+        );
+
+        // 📧 7. SEND SUCCESSION DISPATCH EMAIL TO NEW ADMIN
+        if (savedNewAdmin.getEmail() != null && !savedNewAdmin.getEmail().isEmpty()) {
+            String subject = "RoadWise - Administrative Succession Credentials";
+            String body = "Hello " + savedNewAdmin.getFirstName() + ",\n\n" +
+                    "Administrative authority for the RoadWise System has been formally transferred to you by " +
+                    currentAdmin.getFirstName() + " " + currentAdmin.getLastName() + ".\n\n" +
+                    "Login Credentials:\n" +
+                    "• Username: " + savedNewAdmin.getUsername() + "\n" +
+                    "• Temporary Password: " + tempPassword + "\n\n" +
+                    "Please log in and update your security credentials.\n\n" +
+                    "Best regards,\nRoadWise Administration - City of San Jose del Monte";
+            try {
+                emailService.sendEmail(savedNewAdmin.getEmail(), subject, body);
+            } catch (Exception e) {
+                System.err.println("Turnover email delivery failed: " + e.getMessage());
+            }
+        }
+
+        // 8. RETURN RESPONSE (Includes temp credentials for demo convenience)
+        Map<String, Object> responseData = new HashMap<>();
+        responseData.put("message", "Administrative office successfully turned over!");
+        responseData.put("successorName", savedNewAdmin.getFirstName() + " " + savedNewAdmin.getLastName());
+        responseData.put("successorUsername", savedNewAdmin.getUsername());
+        responseData.put("tempPassword", tempPassword);
+
+        return ResponseEntity.ok(responseData);
+    }
+
+    // ==========================================
+    // 10. CITY ENGINEER (CEO): FORMAL OFFICE TURNOVER
+    // ==========================================
+    @PostMapping("/handover-ceo")
+    public ResponseEntity<?> handoverCeoOffice(
+            @RequestBody Map<String, String> payload,
+            HttpServletRequest request) {
+
+        String currentCeoIdStr = payload.get("currentCeoId");
+        String currentPassword = payload.get("currentPassword");
+        String newFirstName = payload.get("firstName");
+        String newMiddleName = payload.get("middleName");
+        String newLastName = payload.get("lastName");
+        String newEmail = payload.get("email");
+        String newUsername = payload.get("username");
+        String newPhone = payload.get("phoneNumber");
+        String memoNumber = payload.get("memoNumber");
+
+        if (currentCeoIdStr == null || currentPassword == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Current City Engineer credentials are required."));
+        }
+
+        Long currentCeoId = Long.valueOf(currentCeoIdStr);
+        Optional<User> currentCeoOpt = userRepository.findById(currentCeoId);
+        if (currentCeoOpt.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of("error", "Current City Engineer account not found."));
+        }
+
+        User currentCeo = currentCeoOpt.get();
+
+        // 🛡️ 1. SECURITY CHECK: Verify Outgoing CEO Password
+        if (!currentCeo.getPassword().equals(currentPassword)) {
+            activityLogService.log(
+                    currentCeo,
+                    "SECURITY",
+                    "CEO_HANDOVER_UNAUTHORIZED",
+                    "#USR-" + currentCeo.getId(),
+                    "Unauthorized turnover attempt: Incorrect current password submitted.",
+                    "FAILED",
+                    request
+            );
+            return ResponseEntity.status(401).body(Map.of("error", "Incorrect current password. Turnover authorization rejected."));
+        }
+
+        // 🛡️ 2. UNIQUE CONFLICT CHECKS
+        if (userRepository.findByUsername(newUsername).isPresent()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Username '" + newUsername + "' is already taken."));
+        }
+
+        if (userRepository.findByEmail(newEmail).isPresent()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Official email '" + newEmail + "' is already registered to another user."));
+        }
+
+        // 🛡️ 3. GENERATE SECURE TEMPORARY CREDENTIALS
+        String tempPassword = "RoadWise@" + (1000 + new Random().nextInt(9000)) + "!";
+
+        // 4. PROVISION INCOMING SUCCESSOR (Inherits current CEO role)
+        User newCeo = new User();
+        newCeo.setFirstName(newFirstName != null ? newFirstName.trim() : "");
+        newCeo.setMiddleName(newMiddleName != null ? newMiddleName.trim() : "");
+        newCeo.setLastName(newLastName != null ? newLastName.trim() : "");
+        newCeo.setEmail(newEmail != null ? newEmail.trim() : "");
+        newCeo.setUsername(newUsername != null ? newUsername.trim() : "");
+        newCeo.setPhoneNumber(newPhone != null ? newPhone.trim() : "");
+        newCeo.setPassword(tempPassword);
+        newCeo.setRole(currentCeo.getRole() != null ? currentCeo.getRole() : "ENGINEER");
+        newCeo.setStatus("Active");
+        newCeo.setFailedLoginAttempts(0);
+        newCeo.setProfilePicture("no_image.jpg");
+
+        User savedNewCeo = userRepository.save(newCeo);
+
+        // 5. DEACTIVATE OUTGOING PREDECESSOR (Preserve audit integrity)
+        currentCeo.setStatus("Deactivated");
+        userRepository.save(currentCeo);
+
+        // 📋 6. WRITE SYSTEM ACTIVITY LOG
+        String memoText = (memoNumber != null && !memoNumber.trim().isEmpty()) ? " [Memo Ref: " + memoNumber.trim() + "]" : "";
+        activityLogService.log(
+                currentCeo,
+                "AUTH",
+                "OFFICIAL_OFFICE_TURNOVER",
+                "#USR-" + savedNewCeo.getId(),
+                "City Engineer " + currentCeo.getFirstName() + " " + currentCeo.getLastName() +
+                        " officially turned over engineering office to " + savedNewCeo.getFirstName() + " " + savedNewCeo.getLastName() + memoText + ".",
+                "SUCCESS",
+                request
+        );
+
+        // 📧 7. SEND SUCCESSION CREDENTIALS VIA EMAIL
+        if (savedNewCeo.getEmail() != null && !savedNewCeo.getEmail().isEmpty()) {
+            String subject = "RoadWise - City Engineer Succession Credentials";
+            String body = "Hello " + savedNewCeo.getFirstName() + ",\n\n" +
+                    "Engineering administration for the RoadWise System has been formally transferred to you by Engr. " +
+                    currentCeo.getFirstName() + " " + currentCeo.getLastName() + ".\n\n" +
+                    "Login Credentials:\n" +
+                    "• Username: " + savedNewCeo.getUsername() + "\n" +
+                    "• Temporary Password: " + tempPassword + "\n\n" +
+                    "Please log in and update your security credentials.\n\n" +
+                    "Best regards,\nCity Engineering Office - City of San Jose del Monte";
+            try {
+                emailService.sendEmail(savedNewCeo.getEmail(), subject, body);
+            } catch (Exception e) {
+                System.err.println("Turnover email delivery failed: " + e.getMessage());
+            }
+        }
+
+        // 8. RETURN RESPONSE (With demo credentials)
+        Map<String, Object> responseData = new HashMap<>();
+        responseData.put("message", "City Engineering Office successfully turned over!");
+        responseData.put("successorName", savedNewCeo.getFirstName() + " " + savedNewCeo.getLastName());
+        responseData.put("successorUsername", savedNewCeo.getUsername());
+        responseData.put("tempPassword", tempPassword);
+
+        return ResponseEntity.ok(responseData);
+    }
+
 }

@@ -12,12 +12,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
-import java.time.LocalDateTime;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -75,6 +76,20 @@ public class AuthController {
     private static final Map<Long, MfaSession> resetTracker = new ConcurrentHashMap<>();
 
     // ==========================================
+    // 🕒 SERVER-SIDE SESSION LIFECYCLE TRACKER
+    // ==========================================
+    private static class ActiveSession {
+        LocalDateTime loginTime;
+        LocalDateTime lastActiveTime;
+
+        public ActiveSession(LocalDateTime loginTime, LocalDateTime lastActiveTime) {
+            this.loginTime = loginTime;
+            this.lastActiveTime = lastActiveTime;
+        }
+    }
+    private static final Map<Long, ActiveSession> activeSessionTracker = new ConcurrentHashMap<>();
+
+    // ==========================================
     // 3. CREDENTIALS & PROGRESSIVE LOCKOUT
     // ==========================================
     @PostMapping("/login")
@@ -82,18 +97,14 @@ public class AuthController {
         String username = credentials.get("username");
         String password = credentials.get("password");
 
-        // 🛡️ OOM Memory Leak Protection
         if (loginTracker.size() > 2000) {
             loginTracker.clear();
         }
 
-        // Searches by Username first. If not found, searches by Email.
         Optional<User> userOpt = userRepository.findByUsername(username)
                 .or(() -> userRepository.findByEmail(username));
 
-        // ==========================================
         // BRANCH A: USER DOES NOT EXIST
-        // ==========================================
         if (userOpt.isEmpty()) {
             LoginAttemptTracker tracker = loginTracker.computeIfAbsent(username, k -> new LoginAttemptTracker());
 
@@ -103,7 +114,7 @@ public class AuthController {
 
             tracker.attempts++;
             if (tracker.attempts > 5) {
-                long penalty = Math.min((long) Math.pow(2, tracker.attempts - 5), 900); // 15 Min Cap
+                long penalty = Math.min((long) Math.pow(2, tracker.attempts - 5), 900);
                 tracker.lockoutTime = LocalDateTime.now().plusSeconds(penalty);
             }
 
@@ -111,19 +122,15 @@ public class AuthController {
             return ResponseEntity.status(401).body(Map.of("error", "Invalid username or password."));
         }
 
-        // ==========================================
         // BRANCH B: USER EXISTS
-        // ==========================================
         User user = userOpt.get();
         String formattedUserId = String.format("#USR-%04d", user.getId());
 
-        // 1. Penalty Window Check
         if (user.getLockoutUntil() != null && LocalDateTime.now().isBefore(user.getLockoutUntil())) {
             activityLogService.log(null, "AUTH", "AUTH_ACCOUNT_LOCKED", formattedUserId, "Blocked login attempt for '" + username + "' during active progressive lockout penalty.", "WARNING", request);
             return ResponseEntity.status(429).body(Map.of("error", "Too many failed attempts. Account temporarily rate-limited for security."));
         }
 
-        // 2. Verify Password (FAILURE SCENARIO)
         if (!user.getPassword().equals(password)) {
             int attempts = user.getFailedLoginAttempts() + 1;
             user.setFailedLoginAttempts(attempts);
@@ -152,15 +159,11 @@ public class AuthController {
             return ResponseEntity.status(401).body(Map.of("error", "Invalid username or password."));
         }
 
-        // 3. Verify Password (SUCCESS SCENARIO)
         user.setFailedLoginAttempts(0);
         user.setLockoutUntil(null);
         userRepository.save(user);
         loginTracker.remove(username);
 
-        // ==========================================
-        // SYSTEM MAINTENANCE & STATUS CHECKS
-        // ==========================================
         SystemSettings settings = systemSettingsRepository.findById(1L).orElse(null);
         if (settings != null && settings.isMaintenanceMode()) {
             if (!user.getRole().equalsIgnoreCase("Admin") && !user.getRole().equalsIgnoreCase("CPDO Admin")) {
@@ -183,9 +186,6 @@ public class AuthController {
             return ResponseEntity.status(403).body(Map.of("error", "No official email is linked to this account. Cannot proceed with MFA. Contact Admin."));
         }
 
-        // ==========================================
-        // GENERATE & DISPATCH MFA OTP
-        // ==========================================
         String otp = String.format("%06d", new Random().nextInt(999999));
         mfaTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(5)));
 
@@ -212,8 +212,6 @@ public class AuthController {
         responseData.put("mfaRequired", true);
         responseData.put("userId", user.getId());
         responseData.put("message", "A 6-digit code has been sent to your email.");
-
-        // 🚀 DEMO ONLY: Attach the OTP so the frontend can display it
         responseData.put("demoOtp", otp);
 
         return ResponseEntity.ok(responseData);
@@ -251,6 +249,9 @@ public class AuthController {
             return ResponseEntity.status(404).body(Map.of("error", "User not found."));
         }
         User user = userOpt.get();
+
+        // 🕒 Initialize active server-side session clock
+        activeSessionTracker.put(user.getId(), new ActiveSession(LocalDateTime.now(), LocalDateTime.now()));
 
         activityLogService.log(user, "AUTH", "AUTH_LOGIN_SUCCESS", String.format("#USR-%04d", user.getId()), "User successfully verified MFA and established active session for " + user.getRole() + " role.", "SUCCESS", request);
 
@@ -359,7 +360,6 @@ public class AuthController {
         User user = userOpt.get();
         user.setPassword(newPassword);
 
-        // Auto-recover lockout status on successful reset
         user.setFailedLoginAttempts(0);
         user.setLockoutUntil(null);
 
@@ -372,7 +372,7 @@ public class AuthController {
     }
 
     // ==========================================
-    // 7. SERVER-SIDE SESSION VERIFICATION
+    // 7. SERVER-SIDE SESSION VERIFICATION & TIMEOUT AUDIT
     // ==========================================
     @PostMapping("/verify-session")
     public ResponseEntity<?> verifySession(@RequestBody Map<String, Object> payload, HttpServletRequest request) {
@@ -397,13 +397,13 @@ public class AuthController {
 
         User user = userOpt.get();
 
-        // 🛡️ Enforce Account Status Restrictions
         if ("Suspended".equalsIgnoreCase(user.getStatus()) || "Deactivated".equalsIgnoreCase(user.getStatus())) {
+            activeSessionTracker.remove(userId);
             return ResponseEntity.status(403).body(Map.of("valid", false, "error", "Account access revoked."));
         }
 
-        // 🛡️ Prevent Role Spoofing (e.g., Barangay user changing role to Admin in DevTools)
         if (!user.getRole().equalsIgnoreCase(claimedRole)) {
+            activeSessionTracker.remove(userId);
             activityLogService.log(
                     user,
                     "SECURITY",
@@ -416,6 +416,32 @@ public class AuthController {
             return ResponseEntity.status(403).body(Map.of("valid", false, "error", "Role mismatch detected."));
         }
 
+        // 🕒 TIMEOUT AUDIT: 15-Min Inactivity & 8-Hour Absolute Shift Ceiling
+        LocalDateTime now = LocalDateTime.now();
+        ActiveSession session = activeSessionTracker.get(userId);
+
+        if (session != null) {
+            // Absolute check: 8 Hours
+            if (Duration.between(session.loginTime, now).toHours() >= 8) {
+                activeSessionTracker.remove(userId);
+                activityLogService.log(user, "AUTH", "AUTH_SESSION_EXPIRED", String.format("#USR-%04d", user.getId()), "Session expired: Reached 8-hour maximum shift limit.", "INFO", request);
+                return ResponseEntity.status(401).body(Map.of("valid", false, "error", "EXPIRED_ABSOLUTE", "message", "Your 8-hour shift session has ended. Please log in again."));
+            }
+
+            // Inactivity check: 15 Minutes
+            if (Duration.between(session.lastActiveTime, now).toMinutes() >= 15) {
+                activeSessionTracker.remove(userId);
+                activityLogService.log(user, "AUTH", "AUTH_SESSION_TIMEOUT", String.format("#USR-%04d", user.getId()), "Session expired: Inactive for 15 minutes.", "INFO", request);
+                return ResponseEntity.status(401).body(Map.of("valid", false, "error", "EXPIRED_IDLE", "message", "Session timed out due to 15 minutes of inactivity."));
+            }
+
+            // Active request received: advance sliding idle clock
+            session.lastActiveTime = now;
+        } else {
+            // Cold restart recovery: initialize clock
+            activeSessionTracker.put(userId, new ActiveSession(now, now));
+        }
+
         Map<String, Object> result = new HashMap<>();
         result.put("valid", true);
         result.put("role", user.getRole());
@@ -424,4 +450,20 @@ public class AuthController {
         return ResponseEntity.ok(result);
     }
 
+    // ==========================================
+    // 8. SESSION LOGOUT & CLEANUP
+    // ==========================================
+    @PostMapping("/logout")
+    public ResponseEntity<?> logout(@RequestBody(required = false) Map<String, Object> payload, HttpServletRequest request) {
+        if (payload != null && payload.get("userId") != null) {
+            try {
+                Long userId = Long.valueOf(payload.get("userId").toString());
+                activeSessionTracker.remove(userId);
+                userRepository.findById(userId).ifPresent(user ->
+                        activityLogService.log(user, "AUTH", "AUTH_LOGOUT", String.format("#USR-%04d", user.getId()), "User terminated session.", "SUCCESS", request)
+                );
+            } catch (Exception ignored) {}
+        }
+        return ResponseEntity.ok(Map.of("message", "Logged out successfully."));
+    }
 }

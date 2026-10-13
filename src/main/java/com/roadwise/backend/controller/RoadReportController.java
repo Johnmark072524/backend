@@ -109,7 +109,7 @@ public class RoadReportController {
     // 1. CREATE REPORT (BARANGAY OFFICIAL)
     // ==========================================
     @PostMapping(consumes = {"multipart/form-data"})
-    public RoadReport createReport(
+    public ResponseEntity<?> createReport(
             @ModelAttribute RoadReport report,
             @RequestParam(value = "barangayId", required = false) Long barangayId,
             @RequestParam(value = "userId", required = false) Long userId,
@@ -117,6 +117,57 @@ public class RoadReportController {
             HttpServletRequest request) {
 
         try {
+            // 🛡️ 1. MANDATORY PHOTO VALIDATION
+            if (imageFile == null || imageFile.isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "PHOTO_REJECTED",
+                        "reason", "MISSING_IMAGE",
+                        "message", "A road damage photo is required. Please attach a photo."
+                ));
+            }
+
+            // 🧠 2. RUN AI INFERENCE FIRST (Before storage upload or database record creation)
+            RoadInspectionService.InspectionResult aiResult;
+            try {
+                aiResult = aiService.analyzeSeverity(imageFile);
+            } catch (Exception e) {
+                System.err.println(">>> [AI WARNING] Computer Vision analysis failed: " + e.getMessage());
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "PHOTO_REJECTED",
+                        "reason", "AI_UNAVAILABLE",
+                        "message", "AI service is currently unable to analyze this photo. Please ensure it is a clear image of road damage."
+                ));
+            }
+
+            String severity = aiResult != null ? aiResult.getSeverity() : "Unassessed";
+            String status = aiResult != null ? aiResult.getStatus() : "UNKNOWN";
+            double confidence = aiResult != null ? aiResult.getConfidence() : 0.0;
+
+            // 🚫 3. REJECTION GATE: BLOCK UNDAMAGED ROADS
+            if ("Undamaged".equalsIgnoreCase(severity) || "UNDAMAGED".equalsIgnoreCase(status)) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "PHOTO_REJECTED",
+                        "reason", "UNDAMAGED",
+                        "message", "No road damage detected. RoadWise is exclusively for reporting road distress. Please upload a photo with visible damage."
+                ));
+            }
+
+            // 🚫 4. REJECTION GATE: BLOCK NON-ROAD / LOW CONFIDENCE ARTIFACTS
+            if ("Unassessed".equalsIgnoreCase(severity) || "LOW_CONFIDENCE".equalsIgnoreCase(status) || "INVALID_SURFACE".equalsIgnoreCase(status)) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "PHOTO_REJECTED",
+                        "reason", "INVALID_OR_UNCLEAR",
+                        "message", "Image does not show clear road damage or is not a road surface. Please upload a clear photo of road damage."
+                ));
+            }
+
+            // ☁️ 5. PERSIST PHOTO TO SUPABASE STORAGE ONLY IF DAMAGE IS CONFIRMED
+            String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
+            report.setDamageImage(cloudImageUrl);
+            report.setSeverity(severity);
+            report.setCvConfidenceScore(confidence);
+            System.out.println(">>> [AI SUCCESS] Evaluated " + imageFile.getOriginalFilename() + " as " + severity + " (" + confidence + "%)");
+
             User foundUser = null;
             if (barangayId != null) {
                 Barangay foundBarangay = barangayRepository.findById(barangayId).orElse(null);
@@ -131,31 +182,9 @@ public class RoadReportController {
                 }
             }
 
-            // ☁️ UPLOAD TO SUPABASE OBJECT STORAGE & TRIGGER AI
-            if (imageFile != null && !imageFile.isEmpty()) {
-                String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
-                report.setDamageImage(cloudImageUrl);
-
-                // 🧠 AI INFERENCE TRIGGER
-                try {
-                    RoadInspectionService.InspectionResult aiResult = aiService.analyzeSeverity(imageFile);
-                    report.setSeverity(aiResult.getSeverity());
-                    report.setCvConfidenceScore(aiResult.getConfidence());
-                    System.out.println(">>> [AI SUCCESS] Evaluated " + imageFile.getOriginalFilename() + " as " + aiResult.getSeverity() + " (" + aiResult.getConfidence() + "%)");
-                } catch (Exception e) {
-                    System.err.println(">>> [AI WARNING] Computer Vision analysis failed: " + e.getMessage());
-                    report.setSeverity("Unassessed");
-                    report.setCvConfidenceScore(0.0);
-                }
-
-            } else {
-                report.setDamageImage("no_image.jpg");
-                report.setSeverity("Unassessed");
-                report.setCvConfidenceScore(0.0);
-            }
-
             report.setStatus("Pending Validation");
 
+            // 💾 6. COMMIT TO DATABASE
             RoadReport savedReport = repository.save(report);
 
             // 📋 RECORD INITIAL LIFECYCLE EVENT
@@ -210,11 +239,11 @@ public class RoadReportController {
             );
 
             sendLiveUpdate();
-            return savedReport;
+            return ResponseEntity.ok(savedReport);
 
         } catch (Exception e) {
             e.printStackTrace();
-            throw new RuntimeException("Failed to upload image or submit report: " + e.getMessage());
+            return ResponseEntity.status(500).body(Map.of("error", "Failed to upload image or submit report: " + e.getMessage()));
         }
     }
 
@@ -253,7 +282,7 @@ public class RoadReportController {
             String passedUserIdStr = payload.get("userId");
             Long explicitUserId = passedUserIdStr != null ? Long.valueOf(passedUserIdStr) : null;
 
-            // 🎯 1. CAPTURE TARGET COMPLETION DATE (Logged during CEO dispatch)
+            // 🎯 CAPTURE TARGET COMPLETION DATE (Logged during CEO dispatch)
             String targetDateStr = payload.get("targetCompletionDate");
             if (targetDateStr != null && !targetDateStr.trim().isEmpty()) {
                 try {
@@ -473,17 +502,42 @@ public class RoadReportController {
 
             // ☁️ UPLOAD TO SUPABASE & RE-RUN AI ANALYSIS IF A NEW PHOTO WAS PROVIDED
             if (imageFile != null && !imageFile.isEmpty()) {
+                RoadInspectionService.InspectionResult aiResult;
+                try {
+                    aiResult = aiService.analyzeSeverity(imageFile);
+                } catch (Exception e) {
+                    System.err.println(">>> [AI WARNING - RESUBMISSION] Analysis failed: " + e.getMessage());
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "PHOTO_REJECTED",
+                            "reason", "AI_UNAVAILABLE",
+                            "message", "AI service could not process this photo. Please upload a clear photo of road damage."
+                    ));
+                }
+
+                String newSeverity = aiResult != null ? aiResult.getSeverity() : "Unassessed";
+                String newStatus = aiResult != null ? aiResult.getStatus() : "UNKNOWN";
+
+                // Rejection gates on resubmission
+                if ("Undamaged".equalsIgnoreCase(newSeverity) || "UNDAMAGED".equalsIgnoreCase(newStatus)) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "PHOTO_REJECTED",
+                            "reason", "UNDAMAGED",
+                            "message", "No road damage detected in updated photo. Please upload a photo with visible damage."
+                    ));
+                }
+                if ("Unassessed".equalsIgnoreCase(newSeverity) || "LOW_CONFIDENCE".equalsIgnoreCase(newStatus) || "INVALID_SURFACE".equalsIgnoreCase(newStatus)) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "PHOTO_REJECTED",
+                            "reason", "INVALID_OR_UNCLEAR",
+                            "message", "Updated image does not show road distress. Please upload a clear photo of road damage."
+                    ));
+                }
+
                 String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
                 existingReport.setDamageImage(cloudImageUrl);
-
-                try {
-                    RoadInspectionService.InspectionResult aiResult = aiService.analyzeSeverity(imageFile);
-                    existingReport.setSeverity(aiResult.getSeverity());
-                    existingReport.setCvConfidenceScore(aiResult.getConfidence());
-                    System.out.println(">>> [AI SUCCESS - RESUBMISSION] Re-evaluated " + imageFile.getOriginalFilename() + " as " + aiResult.getSeverity() + " (" + aiResult.getConfidence() + "%)");
-                } catch (Exception e) {
-                    System.err.println(">>> [AI WARNING - RESUBMISSION] Computer Vision re-analysis failed: " + e.getMessage());
-                }
+                existingReport.setSeverity(newSeverity);
+                existingReport.setCvConfidenceScore(aiResult.getConfidence());
+                System.out.println(">>> [AI SUCCESS - RESUBMISSION] Re-evaluated " + imageFile.getOriginalFilename() + " as " + newSeverity + " (" + aiResult.getConfidence() + "%)");
             }
 
             boolean isResubmitted = false;
@@ -640,7 +694,7 @@ public class RoadReportController {
                 sendLiveUpdate();
                 return ResponseEntity.ok("Successfully dispatched " + finalDispatchedCount + " prioritized reports to the CEO!");
             } else {
-                repository.saveAll(allReports); // Persist any no-image reports that were auto-archived
+                repository.saveAll(allReports);
                 sendLiveUpdate();
                 return ResponseEntity.badRequest().body("No 'Validated' reports found to dispatch.");
             }
@@ -1227,7 +1281,7 @@ public class RoadReportController {
                     : null;
             User adminActor = resolveActor(explicitUserId, getAdminId());
 
-            // 🔔 1. IN-APP NOTIFICATION TO CEO
+            // 🔔 IN-APP NOTIFICATION TO CEO
             Long ceoId = getCeoId();
             String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
             String notifMsg = "CPDO Admin has flagged PRJ-" + String.format("%04d", report.getId()) + " (" + safeRoadName + "). Status: " + urgencyLabel + ". Please prioritize site completion or report progress.";
@@ -1334,7 +1388,7 @@ public class RoadReportController {
             Long adminId = getAdminId();
             String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
 
-            // 🔔 1. IN-APP NOTIFICATION TO CPDO ADMIN
+            // 🔔 IN-APP NOTIFICATION TO CPDO ADMIN
             notificationService.sendNotification(
                     adminId,
                     "⏱️ Extension Request: PRJ-" + String.format("%04d", report.getId()),
@@ -1392,7 +1446,7 @@ public class RoadReportController {
             RoadReport report = repository.findById(id)
                     .orElseThrow(() -> new RuntimeException("Report not found"));
 
-            String decision = (String) payload.get("decision"); // "APPROVED" or "REJECTED"
+            String decision = (String) payload.get("decision");
             String adminRemarks = (String) payload.get("adminRemarks");
             Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
 
@@ -1421,7 +1475,7 @@ public class RoadReportController {
             Long ceoId = getCeoId();
             String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
 
-            // 🔔 1. NOTIFY CEO (IN-APP + EMAIL)
+            // 🔔 NOTIFY CEO (IN-APP + EMAIL)
             if (ceoId != null) {
                 String title = isApproved ? "✅ Time Extension Approved" : "❌ Time Extension Rejected";
                 String msg = isApproved
@@ -1486,5 +1540,4 @@ public class RoadReportController {
             return ResponseEntity.status(500).body(Map.of("error", "Error reviewing extension request: " + e.getMessage()));
         }
     }
-
 }

@@ -22,59 +22,81 @@ public class RoadInspectionService {
     public static class InspectionResult {
         private final String severity;
         private final double confidence;
+        private final String status;
+        private final String detectedDamageType;
+        private final String message;
 
-        public InspectionResult(String severity, double confidence) {
+        public InspectionResult(String severity, double confidence, String status, String detectedDamageType, String message) {
             this.severity = severity;
             this.confidence = confidence;
+            this.status = status;
+            this.detectedDamageType = detectedDamageType;
+            this.message = message;
         }
 
         public String getSeverity() { return severity; }
         public double getConfidence() { return confidence; }
+        public String getStatus() { return status; }
+        public String getDetectedDamageType() { return detectedDamageType; }
+        public String getMessage() { return message; }
     }
 
-    public InspectionResult analyzeSeverity(MultipartFile file) {
+    public InspectionResult analyzeSeverity(MultipartFile file) throws Exception {
         if (file == null || file.isEmpty()) {
-            return new InspectionResult("Low", 100.0);
+            throw new IllegalArgumentException("Image file is missing or empty.");
         }
 
-        try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
 
-            // Wrap file bytes in ByteArrayResource and preserve original filename
-            ByteArrayResource fileResource = new ByteArrayResource(file.getBytes()) {
-                @Override
-                public String getFilename() {
-                    return file.getOriginalFilename() != null ? file.getOriginalFilename() : "damage_image.jpg";
-                }
-            };
-
-            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-            body.add("file", fileResource);
-
-            HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
-
-            ResponseEntity<Map> response = restTemplate.postForEntity(
-                    aiServiceUrl + "/predict",
-                    requestEntity,
-                    Map.class
-            );
-
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                Map<String, Object> respBody = response.getBody();
-                String severity = respBody.getOrDefault("severity", "Medium").toString();
-                double confidence = Double.parseDouble(respBody.getOrDefault("confidence", 75.0).toString());
-
-                System.out.println(">>> [AI SUCCESS] Predicted: " + severity + " (" + confidence + "%)");
-                return new InspectionResult(severity, confidence);
-            } else {
-                System.err.println(">>> [AI HTTP ERROR] Microservice returned status: " + response.getStatusCode());
+        // Wrap file bytes in ByteArrayResource and preserve original filename
+        ByteArrayResource fileResource = new ByteArrayResource(file.getBytes()) {
+            @Override
+            public String getFilename() {
+                return file.getOriginalFilename() != null ? file.getOriginalFilename() : "damage_image.jpg";
             }
-        } catch (Exception e) {
-            System.err.println(">>> [AI CLIENT ERROR] Microservice communication failed: " + e.getMessage());
+        };
+
+        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+        body.add("file", fileResource);
+
+        HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+
+        // POST to FastAPI /predict endpoint
+        ResponseEntity<Map> response = restTemplate.postForEntity(
+                aiServiceUrl + "/predict",
+                requestEntity,
+                Map.class
+        );
+
+        if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+            Map<String, Object> respBody = response.getBody();
+
+            // Extract severity (defaults to Unassessed if absent)
+            String severity = respBody.getOrDefault("severity", "Unassessed").toString();
+
+            // Safely parse confidence as numeric double
+            double confidence = 0.0;
+            Object confObj = respBody.get("confidence");
+            if (confObj instanceof Number) {
+                confidence = ((Number) confObj).doubleValue();
+            } else if (confObj != null) {
+                try {
+                    confidence = Double.parseDouble(confObj.toString());
+                } catch (NumberFormatException ignored) {}
+            }
+
+            String status = respBody.getOrDefault("status", "UNKNOWN").toString();
+            String detectedDamageType = respBody.get("detected_damage_type") != null
+                    ? respBody.get("detected_damage_type").toString()
+                    : null;
+            String message = respBody.getOrDefault("message", "").toString();
+
+            System.out.println(">>> [AI SUCCESS] Predicted: " + severity + " (" + confidence + "%) | Status: " + status);
+
+            return new InspectionResult(severity, confidence, status, detectedDamageType, message);
         }
 
-        // Safe fallback triage if the microservice is temporarily waking up from cold sleep
-        return new InspectionResult("Medium", 75.0);
+        throw new RuntimeException("AI inference service returned status: " + response.getStatusCode());
     }
 }

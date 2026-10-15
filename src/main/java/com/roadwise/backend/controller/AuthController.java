@@ -449,7 +449,7 @@ public class AuthController {
         return ResponseEntity.ok(result);
     }
 
-    // ==========================================
+    // =========================================
     // 8. SESSION LOGOUT & CLEANUP
     // ==========================================
     @PostMapping("/logout")

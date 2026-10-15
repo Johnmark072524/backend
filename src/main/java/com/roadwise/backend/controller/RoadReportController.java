@@ -117,56 +117,74 @@ public class RoadReportController {
             HttpServletRequest request) {
 
         try {
-            // 🛡️ 1. MANDATORY PHOTO VALIDATION
-            if (imageFile == null || imageFile.isEmpty()) {
+            // 🛡️ 1. CONDITIONAL PHOTO VALIDATION
+            // Check if actual damage is being reported
+            boolean isDamageReported = report.getDamageType() != null
+                    && !report.getDamageType().trim().isEmpty()
+                    && !report.getDamageType().equalsIgnoreCase("None")
+                    && !report.getDamageType().equalsIgnoreCase("Select Damage Type");
+
+            // A photo is only mandatory if the inspector flags road distress
+            if (isDamageReported && (imageFile == null || imageFile.isEmpty())) {
                 return ResponseEntity.badRequest().body(Map.of(
                         "error", "PHOTO_REJECTED",
                         "reason", "MISSING_IMAGE",
-                        "message", "A road damage photo is required. Please attach a photo."
+                        "message", "A road damage photo is required when reporting '" + report.getDamageType() + "'. Please attach a photo."
                 ));
             }
 
-            // 🧠 2. RUN AI INFERENCE FIRST (Before storage upload or database record creation)
-            RoadInspectionService.InspectionResult aiResult;
-            try {
-                aiResult = aiService.analyzeSeverity(imageFile);
-            } catch (Exception e) {
-                System.err.println(">>> [AI WARNING] Computer Vision analysis failed: " + e.getMessage());
-                return ResponseEntity.badRequest().body(Map.of(
-                        "error", "PHOTO_REJECTED",
-                        "reason", "AI_UNAVAILABLE",
-                        "message", "AI service is currently unable to analyze this photo. Please ensure it is a clear image of road damage."
-                ));
+            String severity = "None";
+            String status = "UNDAMAGED";
+            double confidence = 0.0;
+
+            // 🧠 2. PROCESS IMAGE & RUN AI INFERENCE ONLY IF A PHOTO IS PROVIDED
+            if (imageFile != null && !imageFile.isEmpty()) {
+                RoadInspectionService.InspectionResult aiResult;
+                try {
+                    aiResult = aiService.analyzeSeverity(imageFile);
+                } catch (Exception e) {
+                    System.err.println(">>> [AI WARNING] Computer Vision analysis failed: " + e.getMessage());
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "PHOTO_REJECTED",
+                            "reason", "AI_UNAVAILABLE",
+                            "message", "AI service is currently unable to analyze this photo. Please ensure it is a clear image of road damage."
+                    ));
+                }
+
+                severity = aiResult != null ? aiResult.getSeverity() : "Unassessed";
+                status = aiResult != null ? aiResult.getStatus() : "UNKNOWN";
+                confidence = aiResult != null ? aiResult.getConfidence() : 0.0;
+
+                // 🚫 3. REJECTION GATE: BLOCK UNDAMAGED ROADS (WHEN A PHOTO IS SUBMITTED)
+                if ("Undamaged".equalsIgnoreCase(severity) || "UNDAMAGED".equalsIgnoreCase(status)) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "PHOTO_REJECTED",
+                            "reason", "UNDAMAGED",
+                            "message", "No road damage detected in the photo. Please upload a photo with visible distress."
+                    ));
+                }
+
+                // 🚫 4. REJECTION GATE: BLOCK NON-ROAD / LOW CONFIDENCE ARTIFACTS
+                if ("Unassessed".equalsIgnoreCase(severity) || "LOW_CONFIDENCE".equalsIgnoreCase(status) || "INVALID_SURFACE".equalsIgnoreCase(status)) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "PHOTO_REJECTED",
+                            "reason", "INVALID_OR_UNCLEAR",
+                            "message", "Image does not show clear road damage or is not a road surface. Please upload a clear photo of road damage."
+                    ));
+                }
+
+                // ☁️ 5. PERSIST PHOTO TO SUPABASE STORAGE ONLY IF DAMAGE IS CONFIRMED
+                String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
+                report.setDamageImage(cloudImageUrl);
+                report.setSeverity(severity);
+                report.setCvConfidenceScore(confidence);
+                System.out.println(">>> [AI SUCCESS] Evaluated " + imageFile.getOriginalFilename() + " as " + severity + " (" + confidence + "%)");
+            } else {
+                // No photo attached (Road surveyed in good condition / No physical distress)
+                report.setDamageImage(null);
+                report.setSeverity("None");
+                report.setCvConfidenceScore(0.0);
             }
-
-            String severity = aiResult != null ? aiResult.getSeverity() : "Unassessed";
-            String status = aiResult != null ? aiResult.getStatus() : "UNKNOWN";
-            double confidence = aiResult != null ? aiResult.getConfidence() : 0.0;
-
-            // 🚫 3. REJECTION GATE: BLOCK UNDAMAGED ROADS
-            if ("Undamaged".equalsIgnoreCase(severity) || "UNDAMAGED".equalsIgnoreCase(status)) {
-                return ResponseEntity.badRequest().body(Map.of(
-                        "error", "PHOTO_REJECTED",
-                        "reason", "UNDAMAGED",
-                        "message", "No road damage detected. RoadWise is exclusively for reporting road distress. Please upload a photo with visible damage."
-                ));
-            }
-
-            // 🚫 4. REJECTION GATE: BLOCK NON-ROAD / LOW CONFIDENCE ARTIFACTS
-            if ("Unassessed".equalsIgnoreCase(severity) || "LOW_CONFIDENCE".equalsIgnoreCase(status) || "INVALID_SURFACE".equalsIgnoreCase(status)) {
-                return ResponseEntity.badRequest().body(Map.of(
-                        "error", "PHOTO_REJECTED",
-                        "reason", "INVALID_OR_UNCLEAR",
-                        "message", "Image does not show clear road damage or is not a road surface. Please upload a clear photo of road damage."
-                ));
-            }
-
-            // ☁️ 5. PERSIST PHOTO TO SUPABASE STORAGE ONLY IF DAMAGE IS CONFIRMED
-            String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
-            report.setDamageImage(cloudImageUrl);
-            report.setSeverity(severity);
-            report.setCvConfidenceScore(confidence);
-            System.out.println(">>> [AI SUCCESS] Evaluated " + imageFile.getOriginalFilename() + " as " + severity + " (" + confidence + "%)");
 
             User foundUser = null;
             if (barangayId != null) {

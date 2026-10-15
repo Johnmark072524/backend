@@ -212,7 +212,6 @@ public class AuthController {
         responseData.put("mfaRequired", true);
         responseData.put("userId", user.getId());
         responseData.put("message", "A 6-digit code has been sent to your email.");
-        responseData.put("demoOtp", otp);
 
         return ResponseEntity.ok(responseData);
     }

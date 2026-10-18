@@ -492,7 +492,7 @@
     
             }).orElse(ResponseEntity.notFound().build());
         }
-    
+
         // ==========================================
         // 3. UPDATE REPORT (RESUBMISSION BY OFFICIAL)
         // ==========================================
@@ -506,15 +506,12 @@
                                               @RequestParam(value = "numberOfBridges", required = false) Integer numberOfBridges,
                                               @RequestParam(value = "latitude", required = false) Double latitude,
                                               @RequestParam(value = "longitude", required = false) Double longitude,
-                                              @RequestParam(value = "damageType", required = false) String damageType,
-                                              @RequestParam(value = "damageLength", required = false) Double damageLength,
-                                              @RequestParam(value = "damageWidth", required = false) Double damageWidth,
                                               @RequestParam(value = "imageFile", required = false) MultipartFile imageFile,
                                               HttpServletRequest request) {
             try {
                 RoadReport existingReport = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
                 String previousStatus = existingReport.getStatus();
-    
+
                 if (description != null) existingReport.setDamageDescription(description);
                 if (length != null) existingReport.setLength(length);
                 if (width != null) existingReport.setWidth(width);
@@ -522,12 +519,26 @@
                 if (numberOfBridges != null) existingReport.setNumberOfBridges(numberOfBridges);
                 if (latitude != null) existingReport.setLatitude(latitude);
                 if (longitude != null) existingReport.setLongitude(longitude);
-                if (damageType != null) existingReport.setDamageType(damageType);
-                if (damageLength != null) existingReport.setDamageLength(damageLength);
-                if (damageWidth != null) existingReport.setDamageWidth(damageWidth);
-    
+
                 // ☁️ UPLOAD TO SUPABASE & RE-RUN AI ANALYSIS IF A NEW PHOTO WAS PROVIDED
                 if (imageFile != null && !imageFile.isEmpty()) {
+                    // Strict Format & 5MB Size Validation
+                    String contentType = imageFile.getContentType() != null ? imageFile.getContentType().toLowerCase() : "";
+                    if (!contentType.equals("image/jpeg") && !contentType.equals("image/png") && !contentType.equals("image/webp") && !contentType.equals("image/jpg")) {
+                        return ResponseEntity.badRequest().body(Map.of(
+                                "error", "PHOTO_REJECTED",
+                                "reason", "INVALID_FORMAT",
+                                "message", "Invalid file format! Please upload a JPG, PNG, or WebP photo."
+                        ));
+                    }
+                    if (imageFile.getSize() > 5 * 1024 * 1024) {
+                        return ResponseEntity.badRequest().body(Map.of(
+                                "error", "PHOTO_REJECTED",
+                                "reason", "FILE_TOO_LARGE",
+                                "message", "Image exceeds the 5MB size limit! Please upload a smaller photo."
+                        ));
+                    }
+
                     RoadInspectionService.InspectionResult aiResult;
                     try {
                         aiResult = aiService.analyzeSeverity(imageFile);
@@ -539,10 +550,10 @@
                                 "message", "AI service could not process this photo. Please upload a clear photo of road damage."
                         ));
                     }
-    
+
                     String newSeverity = aiResult != null ? aiResult.getSeverity() : "Unassessed";
                     String newStatus = aiResult != null ? aiResult.getStatus() : "UNKNOWN";
-    
+
                     // Rejection gates on resubmission
                     if ("Undamaged".equalsIgnoreCase(newSeverity) || "UNDAMAGED".equalsIgnoreCase(newStatus)) {
                         return ResponseEntity.badRequest().body(Map.of(
@@ -558,28 +569,28 @@
                                 "message", "Updated image does not show road distress. Please upload a clear photo of road damage."
                         ));
                     }
-    
+
                     String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
                     existingReport.setDamageImage(cloudImageUrl);
                     existingReport.setSeverity(newSeverity);
                     existingReport.setCvConfidenceScore(aiResult.getConfidence());
                     System.out.println(">>> [AI SUCCESS - RESUBMISSION] Re-evaluated " + imageFile.getOriginalFilename() + " as " + newSeverity + " (" + aiResult.getConfidence() + "%)");
                 }
-    
+
                 boolean isResubmitted = false;
-    
+
                 if (previousStatus != null && previousStatus.equalsIgnoreCase("Rejected")) {
                     existingReport.setStatus("Resubmitted");
                     isResubmitted = true;
                 } else {
                     existingReport.setStatus("Pending Validation");
                 }
-    
+
                 existingReport.setAdminRemarks(null);
                 repository.save(existingReport);
-    
+
                 User actor = (userId != null) ? userRepository.findById(userId).orElse(existingReport.getUser()) : existingReport.getUser();
-    
+
                 // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
                 reportStatusLogService.log(
                         existingReport,
@@ -592,7 +603,7 @@
                         "Barangay Official",
                         existingReport.getDamageImage()
                 );
-    
+
                 if (isResubmitted) {
                     Long adminId = getAdminId();
                     notificationService.sendNotification(
@@ -602,7 +613,7 @@
                             "REPORT"
                     );
                 }
-    
+
                 activityLogService.log(
                         actor,
                         "PROJECT",
@@ -612,10 +623,10 @@
                         "SUCCESS",
                         request
                 );
-    
+
                 sendLiveUpdate();
                 return ResponseEntity.ok(existingReport);
-    
+
             } catch (Exception e) {
                 return ResponseEntity.status(500).body("Error updating report: " + e.getMessage());
             }

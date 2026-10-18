@@ -23,6 +23,8 @@
     import org.springframework.messaging.simp.SimpMessagingTemplate;
     import org.springframework.web.bind.annotation.*;
     import org.springframework.web.multipart.MultipartFile;
+    import com.roadwise.backend.model.CityRoad;
+    import com.roadwise.backend.repository.CityRoadRepository;
     
     import java.nio.file.Files;
     import java.nio.file.Path;
@@ -39,6 +41,9 @@
     
         @Autowired
         private RoadReportRepository repository;
+
+        @Autowired
+        private CityRoadRepository cityRoadRepository;
     
         @Autowired
         private BarangayRepository barangayRepository;
@@ -291,58 +296,110 @@
             reports.sort((a, b) -> b.getId().compareTo(a.getId()));
             return reports;
         }
-    
+
         // ==========================================
         // 2. THE EMAIL SWITCHBOARD & STATUS UPDATES (CPDO / CEO)
         // ==========================================
         @PutMapping("/{id}/status")
         public ResponseEntity<String> updateReportStatus(
                 @PathVariable Long id,
-                @RequestBody Map<String, String> payload,
+                @RequestBody Map<String, Object> payload,
                 HttpServletRequest request) {
-    
+
             return repository.findById(id).map(report -> {
                 String previousStatus = report.getStatus();
-                String newStatus = payload.get("status");
-                String adminRemarks = payload.get("adminRemarks");
-                String passedUserIdStr = payload.get("userId");
+                String newStatus = payload.get("status") != null ? payload.get("status").toString() : null;
+                String adminRemarks = payload.get("adminRemarks") != null ? payload.get("adminRemarks").toString() : null;
+                String passedUserIdStr = payload.get("userId") != null ? payload.get("userId").toString() : null;
                 Long explicitUserId = passedUserIdStr != null ? Long.valueOf(passedUserIdStr) : null;
-    
+
                 // 🎯 CAPTURE TARGET COMPLETION DATE (Logged during CEO dispatch)
-                String targetDateStr = payload.get("targetCompletionDate");
-                if (targetDateStr != null && !targetDateStr.trim().isEmpty()) {
+                Object targetDateObj = payload.get("targetCompletionDate");
+                if (targetDateObj != null && !targetDateObj.toString().trim().isEmpty()) {
                     try {
-                        report.setTargetCompletionDate(LocalDate.parse(targetDateStr.trim()));
+                        report.setTargetCompletionDate(LocalDate.parse(targetDateObj.toString().trim()));
                     } catch (Exception e) {
-                        System.err.println("Failed to parse target completion date: " + targetDateStr);
+                        System.err.println("Failed to parse target completion date: " + targetDateObj);
                     }
                 }
-    
-                // 🛡️ OPTION A: AUTO-ARCHIVE REPORTS WITHOUT PHOTO DAMAGE EVIDENCE UPON VALIDATION
+
+                // 📐 CAPTURE CPDO TECHNICAL DAMAGE ASSESSMENT (When Validating)
+                if (payload.get("damageType") != null) {
+                    report.setDamageType(payload.get("damageType").toString());
+                }
+                if (payload.get("damageLength") != null) {
+                    try { report.setDamageLength(Double.valueOf(payload.get("damageLength").toString())); } catch (Exception ignored) {}
+                }
+                if (payload.get("damageWidth") != null) {
+                    try { report.setDamageWidth(Double.valueOf(payload.get("damageWidth").toString())); } catch (Exception ignored) {}
+                }
+                if (payload.get("damageDepth") != null) {
+                    try { report.setDamageDepth(Double.valueOf(payload.get("damageDepth").toString())); } catch (Exception ignored) {}
+                }
+
+                // 🛣️ CAPTURE ROAD DIMENSIONS & SYNC WITH MASTER INVENTORY (city_roads)
+                Double updatedWidth = null;
+                if (payload.get("width") != null) {
+                    try {
+                        updatedWidth = Double.valueOf(payload.get("width").toString());
+                        report.setWidth(updatedWidth);
+                    } catch (Exception ignored) {}
+                }
+                if (payload.get("length") != null) {
+                    try { report.setLength(Double.valueOf(payload.get("length").toString())); } catch (Exception ignored) {}
+                }
+                if (payload.get("lengthOfCulverts") != null) {
+                    try { report.setLengthOfCulverts(Double.valueOf(payload.get("lengthOfCulverts").toString())); } catch (Exception ignored) {}
+                }
+                if (payload.get("numberOfBridges") != null) {
+                    try { report.setNumberOfBridges(Integer.valueOf(payload.get("numberOfBridges").toString())); } catch (Exception ignored) {}
+                }
+
+                // 🔄 SYNC TO MASTER INVENTORY: Save road_width to city_roads for future auto-fills
+                if (updatedWidth != null && updatedWidth > 0 && report.getCityRoadId() != null) {
+                    String cleanTargetRoadId = report.getCityRoadId().replace(" ", "").trim();
+                    List<CityRoad> matchedRoads = cityRoadRepository.findAll().stream()
+                            .filter(cr -> cr.getRoadId() != null && cr.getRoadId().replace(" ", "").trim().equalsIgnoreCase(cleanTargetRoadId))
+                            .toList();
+
+                    for (CityRoad cr : matchedRoads) {
+                        cr.setRoadWidth(updatedWidth);
+                        if (report.getLength() != null && report.getLength() > 0) cr.setRoadLength(report.getLength());
+                        if (report.getLengthOfCulverts() != null) cr.setLengthOfCulverts(report.getLengthOfCulverts());
+                        if (report.getNumberOfBridges() != null) cr.setNumberOfBridges(report.getNumberOfBridges());
+                    }
+                    if (!matchedRoads.isEmpty()) {
+                        cityRoadRepository.saveAll(matchedRoads);
+                        System.out.println(">>> [SYNC SUCCESS] Master CityRoad record '" + report.getCityRoadId() + "' updated with Road Width: " + updatedWidth + "m");
+                    }
+                }
+
+                // 🛡️ AUTO-ARCHIVE REPORTS WITHOUT DAMAGE EVIDENCE UPON VALIDATION
                 boolean isAutoArchivedNoDamage = false;
                 if (newStatus != null && newStatus.equalsIgnoreCase("Validated")) {
                     boolean hasNoDamageImage = report.getDamageImage() == null ||
                             report.getDamageImage().trim().isEmpty() ||
                             report.getDamageImage().trim().equalsIgnoreCase("no_image.jpg");
-    
-                    if (hasNoDamageImage) {
+
+                    boolean isMarkedNone = "None".equalsIgnoreCase(report.getDamageType());
+
+                    if (hasNoDamageImage && isMarkedNone) {
                         newStatus = "Archived";
                         isAutoArchivedNoDamage = true;
                         if (adminRemarks == null || adminRemarks.trim().isEmpty()) {
-                            adminRemarks = "Inspected by CPDO: No physical road damage detected. Ticket archived as 'No Action Required'.";
+                            adminRemarks = "Inspected by CPDO: Road surveyed in passable/good condition. Ticket archived as 'No Action Required'.";
                         }
                     }
                 }
-    
-                // 🛡️ IDEMPOTENCY GUARD: Prevent duplicate execution from rapid double-clicks
+
+                // 🛡️ IDEMPOTENCY GUARD
                 if (newStatus != null && newStatus.equalsIgnoreCase(previousStatus)) {
                     return ResponseEntity.ok("ALREADY_UPDATED");
                 }
-    
+
                 if (newStatus != null) {
                     report.setStatus(newStatus);
-    
-                    // 🎯 STAMP OFFICIAL CONCLUDED / ARCHIVED & ACTUAL COMPLETION DATE IN PHILIPPINE STANDARD TIME (PST)
+
                     if (newStatus.equalsIgnoreCase("Closed") ||
                             newStatus.equalsIgnoreCase("Resolved") ||
                             newStatus.equalsIgnoreCase("Archived") ||
@@ -352,18 +409,18 @@
                         report.setActualCompletionDate(nowPst);
                     }
                 }
-    
+
                 if (adminRemarks != null) {
                     report.setAdminRemarks(adminRemarks);
                 }
-    
+
                 repository.save(report);
-    
+
                 sendStatusUpdateEmail(report, newStatus, adminRemarks);
-    
+
                 Long adminId = getAdminId();
                 Long ceoId = getCeoId();
-    
+
                 if (newStatus != null) {
                     if (newStatus.equalsIgnoreCase("Completed") || (newStatus.equalsIgnoreCase("In Progress") && (adminRemarks == null || adminRemarks.trim().isEmpty()))) {
                         notificationService.sendNotification(
@@ -373,7 +430,7 @@
                                 "REPORT"
                         );
                     }
-    
+
                     if (newStatus.equalsIgnoreCase("In Progress") && adminRemarks != null && !adminRemarks.trim().isEmpty()) {
                         if (ceoId != null) {
                             notificationService.sendNotification(
@@ -382,10 +439,9 @@
                                     "The CPDO Admin has requested a rework for PRJ-" + report.getId() + ". Admin Remarks: " + adminRemarks,
                                     "REPORT"
                             );
-    
-                            // 🔒 CAPTURE EFFECTIVELY FINAL STRING FOR LAMBDA
+
                             final String reworkRemarks = adminRemarks;
-    
+
                             userRepository.findById(ceoId).ifPresent(ceo -> {
                                 if (ceo.getEmail() != null && !ceo.getEmail().isEmpty()) {
                                     String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
@@ -400,16 +456,16 @@
                             });
                         }
                     }
-    
+
                     if (report.getUser() != null) {
                         Long brgyUserId = report.getUser().getId();
                         String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
-    
+
                         if (isAutoArchivedNoDamage) {
                             notificationService.sendNotification(
                                     brgyUserId,
                                     "Report Inspected & Archived",
-                                    "CPDO reviewed Report #PRJ-" + report.getId() + " for " + safeRoadName + ". No photographic damage was found; ticket has been archived as 'Good Condition'.",
+                                    "CPDO reviewed Report #PRJ-" + report.getId() + " for " + safeRoadName + ". Road confirmed in good condition; ticket has been archived.",
                                     "REPORT"
                             );
                         } else if (newStatus.equalsIgnoreCase("Validated")) {
@@ -424,7 +480,7 @@
                         }
                     }
                 }
-    
+
                 User actor;
                 String logCategory = "PROJECT";
                 String logAction = "STATUS_UPDATED_" + (newStatus != null ? newStatus.toUpperCase().replace(" ", "_") : "UNKNOWN");
@@ -432,9 +488,9 @@
                         ? "CPDO inspected report without damage evidence. Ticket archived as 'No Action Required'."
                         : "Project status transitioned to '" + newStatus + "' on " + report.getCityRoadName() + "." +
                           (adminRemarks != null && !adminRemarks.trim().isEmpty() ? " Remarks: " + adminRemarks : "");
-    
+
                 String lifecycleAction = "STATUS_UPDATE";
-    
+
                 if (isAutoArchivedNoDamage) {
                     logCategory = "QA";
                     logAction = "REPORT_INSPECTED_NO_DAMAGE";
@@ -463,7 +519,7 @@
                 } else {
                     actor = resolveActor(explicitUserId, adminId);
                 }
-    
+
                 // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
                 reportStatusLogService.log(
                         report,
@@ -476,7 +532,7 @@
                         "ADMIN",
                         report.getProofOfRepairImage()
                 );
-    
+
                 activityLogService.log(
                         actor,
                         logCategory,
@@ -486,10 +542,10 @@
                         "SUCCESS",
                         request
                 );
-    
+
                 sendLiveUpdate();
                 return ResponseEntity.ok(isAutoArchivedNoDamage ? "ARCHIVED_NO_IMAGE" : "SUCCESS");
-    
+
             }).orElse(ResponseEntity.notFound().build());
         }
 

@@ -24,7 +24,7 @@ public class RoadReport {
     private Integer numberOfBridges;
     private Double lengthOfCulverts;
 
-    // --- 2. Damage Information (From Frontend) ---
+    // --- 2. Damage Information (Inspected by CPDO Admin / AI) ---
     @Column(columnDefinition = "TEXT")
     private String damageImage;
 
@@ -36,6 +36,9 @@ public class RoadReport {
     private String damageType;
     private Double damageLength;
     private Double damageWidth;
+
+    @Column(name = "damage_depth")
+    private Double damageDepth = 0.0;
 
     // --- 3. System & Analytics Tracking ---
     private Integer inventoryYear;
@@ -279,38 +282,6 @@ public class RoadReport {
         return barangay;
     }
 
-    public LocalDateTime getLastReminderSent() {
-        return lastReminderSent;
-    }
-
-    public void setLastReminderSent(LocalDateTime lastReminderSent) {
-        this.lastReminderSent = lastReminderSent;
-    }
-
-    public LocalDate getExtensionTargetDate() {
-        return extensionTargetDate;
-    }
-
-    public void setExtensionTargetDate(LocalDate extensionTargetDate) {
-        this.extensionTargetDate = extensionTargetDate;
-    }
-
-    public String getExtensionReason() {
-        return extensionReason;
-    }
-
-    public void setExtensionReason(String extensionReason) {
-        this.extensionReason = extensionReason;
-    }
-
-    public String getExtensionStatus() {
-        return extensionStatus;
-    }
-
-    public void setExtensionStatus(String extensionStatus) {
-        this.extensionStatus = extensionStatus;
-    }
-
     public void setBarangay(Barangay barangay) {
         this.barangay = barangay;
     }
@@ -379,6 +350,14 @@ public class RoadReport {
         this.damageWidth = damageWidth;
     }
 
+    public Double getDamageDepth() {
+        return damageDepth;
+    }
+
+    public void setDamageDepth(Double damageDepth) {
+        this.damageDepth = damageDepth;
+    }
+
     public LocalDateTime getDateArchived() {
         return dateArchived;
     }
@@ -401,5 +380,37 @@ public class RoadReport {
 
     public void setActualCompletionDate(LocalDateTime actualCompletionDate) {
         this.actualCompletionDate = actualCompletionDate;
+    }
+
+    public LocalDateTime getLastReminderSent() {
+        return lastReminderSent;
+    }
+
+    public void setLastReminderSent(LocalDateTime lastReminderSent) {
+        this.lastReminderSent = lastReminderSent;
+    }
+
+    public LocalDate getExtensionTargetDate() {
+        return extensionTargetDate;
+    }
+
+    public void setExtensionTargetDate(LocalDate extensionTargetDate) {
+        this.extensionTargetDate = extensionTargetDate;
+    }
+
+    public String getExtensionReason() {
+        return extensionReason;
+    }
+
+    public void setExtensionReason(String extensionReason) {
+        this.extensionReason = extensionReason;
+    }
+
+    public String getExtensionStatus() {
+        return extensionStatus;
+    }
+
+    public void setExtensionStatus(String extensionStatus) {
+        this.extensionStatus = extensionStatus;
     }
 }

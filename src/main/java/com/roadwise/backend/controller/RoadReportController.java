@@ -1609,7 +1609,7 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 13. CPDO ADMIN: REVIEW TIME EXTENSION (APPROVE / REJECT)
+    // 13. CPDO ADMIN: REVIEW TIME EXTENSION (APPROVE/ REJECT)
     // ==========================================
     @PutMapping("/{id}/review-extension")
     public ResponseEntity<?> reviewExtension(

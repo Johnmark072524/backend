@@ -69,6 +69,10 @@ public class RoadReport {
     private String cvDamageClassification;
     private Double cvConfidenceScore;
 
+    // Under --- 3. System & Analytics Tracking ---
+    @Column(name = "ai_severity")
+    private String aiSeverity;
+
     // Relationships
     @JsonIgnoreProperties({"reports", "hibernateLazyInitializer", "handler"})
     @ManyToOne(fetch = FetchType.EAGER)
@@ -413,4 +417,13 @@ public class RoadReport {
     public void setExtensionStatus(String extensionStatus) {
         this.extensionStatus = extensionStatus;
     }
+
+    public String getAiSeverity() {
+        return aiSeverity;
+    }
+
+    public void setAiSeverity(String aiSeverity) {
+        this.aiSeverity = aiSeverity;
+    }
+
 }

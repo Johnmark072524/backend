@@ -741,8 +741,24 @@ public class RoadReportController {
             if (latitude != null) existingReport.setLatitude(latitude);
             if (longitude != null) existingReport.setLongitude(longitude);
 
+            // 🔍 CHECK PERSPECTIVE COMBINATIONS
+            boolean hasAnyAngle = (imageWhole != null && !imageWhole.isEmpty()) ||
+                    (imageTop != null && !imageTop.isEmpty()) ||
+                    (imageLeft != null && !imageLeft.isEmpty()) ||
+                    (imageRight != null && !imageRight.isEmpty()) ||
+                    (imageClose != null && !imageClose.isEmpty());
+
             boolean hasBatchPhotos = (imageWhole != null && !imageWhole.isEmpty()) && (imageTop != null && !imageTop.isEmpty());
             boolean hasLegacyPhoto = imageFile != null && !imageFile.isEmpty();
+
+            // 🛡️ GUARD: If the official tries to update photos but misses a mandatory angle
+            if (hasAnyAngle && !hasBatchPhotos) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "PHOTO_REJECTED",
+                        "reason", "MISSING_MANDATORY_ANGLES",
+                        "message", "Both the Road Context (Whole View) and the Top-Down View are required when updating photos."
+                ));
+            }
 
             if (hasBatchPhotos || hasLegacyPhoto) {
                 MultipartFile[] filesToValidate = hasBatchPhotos

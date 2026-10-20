@@ -24,9 +24,26 @@ public class RoadReport {
     private Integer numberOfBridges;
     private Double lengthOfCulverts;
 
-    // --- 2. Damage Information (Inspected by CPDO Admin / AI) ---
+    // --- 2. Damage Information & Photos ---
+    // Primary display / fallback thumbnail
     @Column(columnDefinition = "TEXT")
     private String damageImage;
+
+    // 📸 5-Angle Perspective Photos
+    @Column(name = "damage_image_whole", columnDefinition = "TEXT")
+    private String damageImageWhole;
+
+    @Column(name = "damage_image_top", columnDefinition = "TEXT")
+    private String damageImageTop;
+
+    @Column(name = "damage_image_left", columnDefinition = "TEXT")
+    private String damageImageLeft;
+
+    @Column(name = "damage_image_right", columnDefinition = "TEXT")
+    private String damageImageRight;
+
+    @Column(name = "damage_image_close", columnDefinition = "TEXT")
+    private String damageImageClose;
 
     @Column(columnDefinition = "TEXT")
     private String damageDescription;
@@ -69,7 +86,6 @@ public class RoadReport {
     private String cvDamageClassification;
     private Double cvConfidenceScore;
 
-    // Under --- 3. System & Analytics Tracking ---
     @Column(name = "ai_severity")
     private String aiSeverity;
 
@@ -208,6 +224,47 @@ public class RoadReport {
 
     public void setDamageImage(String damageImage) {
         this.damageImage = damageImage;
+    }
+
+    // --- 📸 5-Angle Image Getters & Setters ---
+    public String getDamageImageWhole() {
+        return damageImageWhole;
+    }
+
+    public void setDamageImageWhole(String damageImageWhole) {
+        this.damageImageWhole = damageImageWhole;
+    }
+
+    public String getDamageImageTop() {
+        return damageImageTop;
+    }
+
+    public void setDamageImageTop(String damageImageTop) {
+        this.damageImageTop = damageImageTop;
+    }
+
+    public String getDamageImageLeft() {
+        return damageImageLeft;
+    }
+
+    public void setDamageImageLeft(String damageImageLeft) {
+        this.damageImageLeft = damageImageLeft;
+    }
+
+    public String getDamageImageRight() {
+        return damageImageRight;
+    }
+
+    public void setDamageImageRight(String damageImageRight) {
+        this.damageImageRight = damageImageRight;
+    }
+
+    public String getDamageImageClose() {
+        return damageImageClose;
+    }
+
+    public void setDamageImageClose(String damageImageClose) {
+        this.damageImageClose = damageImageClose;
     }
 
     public String getDamageDescription() {
@@ -425,5 +482,4 @@ public class RoadReport {
     public void setAiSeverity(String aiSeverity) {
         this.aiSeverity = aiSeverity;
     }
-
 }

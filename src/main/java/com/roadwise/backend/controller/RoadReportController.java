@@ -152,25 +152,25 @@ public class RoadReportController {
         } else if (type.contains("crack")) {
             score += 2;
         } else {
-            score += 2; // Custom / Other distress
+            score += 2;
         }
 
         // 2. DIMENSION MULTIPLIER (Depth & Surface Area Thresholds)
         if (dDepth >= 0.12) {
-            score += 3; // Severe cavity (> 12 cm)
+            score += 3;
         } else if (dDepth >= 0.06) {
-            score += 2; // Moderate cavity (6 cm to 12 cm)
+            score += 2;
         }
 
         if (area >= 3.0) {
-            score += 2; // Extensive surface area
+            score += 2;
         } else if (area >= 1.0) {
             score += 1;
         }
 
         // 3. ROAD IMPORTANCE EXPOSURE FACTOR (Core vs. Non-Core)
         if (isCoreRoad) {
-            score += 2; // High traffic volume / arterial multiplier
+            score += 2;
         }
 
         // 4. FINAL RESOLUTION MAPPING
@@ -183,6 +183,19 @@ public class RoadReportController {
         }
     }
 
+    // Helper: Validates image size and type
+    private String validateImageFile(MultipartFile file) {
+        if (file == null || file.isEmpty()) return null;
+        String contentType = file.getContentType() != null ? file.getContentType().toLowerCase() : "";
+        if (!contentType.equals("image/jpeg") && !contentType.equals("image/png") && !contentType.equals("image/webp") && !contentType.equals("image/jpg")) {
+            return "Invalid file format for '" + file.getOriginalFilename() + "'! Please upload JPG, PNG, or WebP.";
+        }
+        if (file.getSize() > (5 * 1024 * 1024)) {
+            return "Image '" + file.getOriginalFilename() + "' exceeds the 5MB size limit!";
+        }
+        return null;
+    }
+
     // ==========================================
     // 1. CREATE REPORT (BARANGAY OFFICIAL)
     // ==========================================
@@ -191,11 +204,17 @@ public class RoadReportController {
             @ModelAttribute RoadReport report,
             @RequestParam(value = "barangayId", required = false) Long barangayId,
             @RequestParam(value = "userId", required = false) Long userId,
+            // 📸 5 Perspective Photos
+            @RequestParam(value = "imageWhole", required = false) MultipartFile imageWhole,
+            @RequestParam(value = "imageTop", required = false) MultipartFile imageTop,
+            @RequestParam(value = "imageLeft", required = false) MultipartFile imageLeft,
+            @RequestParam(value = "imageRight", required = false) MultipartFile imageRight,
+            @RequestParam(value = "imageClose", required = false) MultipartFile imageClose,
+            // Legacy single image parameter
             @RequestParam(value = "imageFile", required = false) MultipartFile imageFile,
             HttpServletRequest request) {
 
         try {
-            // Default values if no image is provided
             String severity = "None";
             String status = "UNDAMAGED";
             double confidence = 0.0;
@@ -207,34 +226,55 @@ public class RoadReportController {
             if (report.getDamageWidth() == null) report.setDamageWidth(0.0);
             if (report.getDamageDepth() == null) report.setDamageDepth(0.0);
 
-            // 🧠 PROCESS IMAGE & RUN AI INFERENCE ONLY IF A PHOTO IS PROVIDED
-            if (imageFile != null && !imageFile.isEmpty()) {
-                // Backend MIME & 5MB size check
-                String contentType = imageFile.getContentType() != null ? imageFile.getContentType().toLowerCase() : "";
-                if (!contentType.equals("image/jpeg") && !contentType.equals("image/png") && !contentType.equals("image/webp") && !contentType.equals("image/jpg")) {
-                    return ResponseEntity.badRequest().body(Map.of(
-                            "error", "PHOTO_REJECTED",
-                            "reason", "INVALID_FORMAT",
-                            "message", "Invalid file format! Please upload a JPG, PNG, or WebP photo."
-                    ));
-                }
-                if (imageFile.getSize() > 5 * 1024 * 1024) {
-                    return ResponseEntity.badRequest().body(Map.of(
-                            "error", "PHOTO_REJECTED",
-                            "reason", "FILE_TOO_LARGE",
-                            "message", "Image exceeds the 5MB size limit! Please upload a smaller photo."
-                    ));
+            // 🔍 CHECK PERSPECTIVE COMBINATIONS
+            boolean hasAnyAngle = (imageWhole != null && !imageWhole.isEmpty()) ||
+                    (imageTop != null && !imageTop.isEmpty()) ||
+                    (imageLeft != null && !imageLeft.isEmpty()) ||
+                    (imageRight != null && !imageRight.isEmpty()) ||
+                    (imageClose != null && !imageClose.isEmpty());
+
+            boolean hasBatchPhotos = (imageWhole != null && !imageWhole.isEmpty()) && (imageTop != null && !imageTop.isEmpty());
+            boolean hasLegacyPhoto = imageFile != null && !imageFile.isEmpty();
+
+            // 🛡️ GUARD: If the user attempted a multi-angle submission but missed a mandatory angle
+            if (hasAnyAngle && !hasBatchPhotos) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "PHOTO_REJECTED",
+                        "reason", "MISSING_MANDATORY_ANGLES",
+                        "message", "Both the Road Context (Whole View) and the Top-Down View are mandatory when uploading photos."
+                ));
+            }
+
+            if (hasBatchPhotos || hasLegacyPhoto) {
+                // Validate individual files
+                MultipartFile[] filesToValidate = hasBatchPhotos
+                        ? new MultipartFile[]{imageWhole, imageTop, imageLeft, imageRight, imageClose}
+                        : new MultipartFile[]{imageFile};
+
+                for (MultipartFile f : filesToValidate) {
+                    String validationErr = validateImageFile(f);
+                    if (validationErr != null) {
+                        return ResponseEntity.badRequest().body(Map.of(
+                                "error", "PHOTO_REJECTED",
+                                "reason", "INVALID_FILE",
+                                "message", validationErr
+                        ));
+                    }
                 }
 
                 RoadInspectionService.InspectionResult aiResult;
                 try {
-                    aiResult = aiService.analyzeSeverity(imageFile);
+                    if (hasBatchPhotos) {
+                        aiResult = aiService.analyzeBatchSeverity(imageWhole, imageTop, imageLeft, imageRight, imageClose);
+                    } else {
+                        aiResult = aiService.analyzeSeverity(imageFile);
+                    }
                 } catch (Exception e) {
                     System.err.println(">>> [AI WARNING] Computer Vision analysis failed: " + e.getMessage());
                     return ResponseEntity.badRequest().body(Map.of(
                             "error", "PHOTO_REJECTED",
                             "reason", "AI_UNAVAILABLE",
-                            "message", "AI service is currently unable to analyze this photo. Please ensure it is a clear image of road damage."
+                            "message", "AI service is currently unable to analyze the photo(s). Please ensure clear road distress photos are uploaded."
                     ));
                 }
 
@@ -242,34 +282,62 @@ public class RoadReportController {
                 status = aiResult != null ? aiResult.getStatus() : "UNKNOWN";
                 confidence = aiResult != null ? aiResult.getConfidence() : 0.0;
 
-                // 🚫 2. REJECTION GATE: BLOCK UNDAMAGED ROADS (WHEN A PHOTO IS SUBMITTED)
+                // 🚫 REJECTION GATES
                 if ("Undamaged".equalsIgnoreCase(severity) || "UNDAMAGED".equalsIgnoreCase(status)) {
                     return ResponseEntity.badRequest().body(Map.of(
                             "error", "PHOTO_REJECTED",
                             "reason", "UNDAMAGED",
-                            "message", "No road damage detected in the photo. Please upload a photo with visible distress."
+                            "message", "No road damage detected in the photos. Please upload photos with visible distress."
                     ));
                 }
 
-                // 🚫 3. REJECTION GATE: BLOCK NON-ROAD / LOW CONFIDENCE ARTIFACTS
                 if ("Unassessed".equalsIgnoreCase(severity) || "LOW_CONFIDENCE".equalsIgnoreCase(status) || "INVALID_SURFACE".equalsIgnoreCase(status)) {
                     return ResponseEntity.badRequest().body(Map.of(
                             "error", "PHOTO_REJECTED",
                             "reason", "INVALID_OR_UNCLEAR",
-                            "message", "Image does not show clear road damage or is not a road surface. Please upload a clear photo of road damage."
+                            "message", "Photos do not show clear road damage or are not a road surface. Please upload clear photos of road damage."
                     ));
                 }
 
-                // ☁️ 4. PERSIST PHOTO TO SUPABASE STORAGE ONLY IF DAMAGE IS CONFIRMED
-                String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
-                report.setDamageImage(cloudImageUrl);
-                report.setAiSeverity(severity); // 🧠 Initial Computer Vision screening
-                report.setSeverity(severity);   // Baseline fallback until CPDO validates
+                // ☁️ UPLOAD CONFIRMED PHOTOS TO SUPABASE
+                if (hasBatchPhotos) {
+                    String urlWhole = supabaseStorageService.uploadImage(imageWhole);
+                    String urlTop = supabaseStorageService.uploadImage(imageTop);
+                    String urlLeft = (imageLeft != null && !imageLeft.isEmpty()) ? supabaseStorageService.uploadImage(imageLeft) : null;
+                    String urlRight = (imageRight != null && !imageRight.isEmpty()) ? supabaseStorageService.uploadImage(imageRight) : null;
+                    String urlClose = (imageClose != null && !imageClose.isEmpty()) ? supabaseStorageService.uploadImage(imageClose) : null;
+
+                    report.setDamageImageWhole(urlWhole);
+                    report.setDamageImageTop(urlTop);
+                    report.setDamageImageLeft(urlLeft);
+                    report.setDamageImageRight(urlRight);
+                    report.setDamageImageClose(urlClose);
+
+                    // Primary thumbnail defaults to Whole Road View
+                    report.setDamageImage(urlWhole);
+                } else {
+                    String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
+                    report.setDamageImage(cloudImageUrl);
+                    report.setDamageImageWhole(cloudImageUrl);
+                    report.setDamageImageTop(cloudImageUrl);
+                }
+
+                report.setAiSeverity(severity);
+                report.setSeverity(severity);
                 report.setCvConfidenceScore(confidence);
-                System.out.println(">>> [AI SUCCESS] Evaluated " + imageFile.getOriginalFilename() + " as " + severity + " (" + confidence + "%)");
+                if (aiResult != null && aiResult.getDetectedDamageType() != null && "Pending Inspection".equalsIgnoreCase(report.getDamageType())) {
+                    report.setDamageType(aiResult.getDetectedDamageType());
+                }
+
+                System.out.println(">>> [AI SUCCESS] Evaluated multi-angle submission as " + severity + " (" + confidence + "%)");
             } else {
                 // No photo attached (Road surveyed in good condition / No physical distress)
                 report.setDamageImage(null);
+                report.setDamageImageWhole(null);
+                report.setDamageImageTop(null);
+                report.setDamageImageLeft(null);
+                report.setDamageImageRight(null);
+                report.setDamageImageClose(null);
                 report.setAiSeverity("None");
                 report.setSeverity("None");
                 report.setCvConfidenceScore(0.0);
@@ -292,10 +360,10 @@ public class RoadReportController {
 
             report.setStatus("Pending Validation");
 
-            // 💾 5. COMMIT TO DATABASE
+            // 💾 COMMIT TO DATABASE
             RoadReport savedReport = repository.save(report);
 
-            // 📋 RECORD INITIAL LIFECYCLE EVENT
+            // 📋 LOG LIFECYCLE EVENT
             reportStatusLogService.log(
                     savedReport,
                     "SUBMITTED",
@@ -335,7 +403,7 @@ public class RoadReportController {
                 );
             }
 
-            // ⏱️ AUDIT LOG: NEW REPORT SUBMITTED
+            // ⏱️ AUDIT LOG
             activityLogService.log(
                     foundUser,
                     "PROJECT",
@@ -351,7 +419,7 @@ public class RoadReportController {
 
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.status(500).body(Map.of("error", "Failed to upload image or submit report: " + e.getMessage()));
+            return ResponseEntity.status(500).body(Map.of("error", "Failed to upload images or submit report: " + e.getMessage()));
         }
     }
 
@@ -390,7 +458,7 @@ public class RoadReportController {
             String passedUserIdStr = payload.get("userId") != null ? payload.get("userId").toString() : null;
             Long explicitUserId = passedUserIdStr != null ? Long.valueOf(passedUserIdStr) : null;
 
-            // 🎯 CAPTURE TARGET COMPLETION DATE (Logged during CEO dispatch)
+            // 🎯 CAPTURE TARGET COMPLETION DATE
             Object targetDateObj = payload.get("targetCompletionDate");
             if (targetDateObj != null && !targetDateObj.toString().trim().isEmpty()) {
                 try {
@@ -400,7 +468,7 @@ public class RoadReportController {
                 }
             }
 
-            // 📐 CAPTURE CPDO TECHNICAL DAMAGE ASSESSMENT (When Validating)
+            // 📐 CAPTURE CPDO TECHNICAL DAMAGE ASSESSMENT
             if (payload.get("damageType") != null) {
                 report.setDamageType(payload.get("damageType").toString());
             }
@@ -414,7 +482,7 @@ public class RoadReportController {
                 try { report.setDamageDepth(Double.valueOf(payload.get("damageDepth").toString())); } catch (Exception ignored) {}
             }
 
-            // 🛣️ CAPTURE ROAD DIMENSIONS & SYNC WITH MASTER INVENTORY (city_roads)
+            // 🛣️ CAPTURE ROAD DIMENSIONS & SYNC WITH MASTER INVENTORY
             Double updatedWidth = null;
             if (payload.get("width") != null) {
                 try {
@@ -432,7 +500,6 @@ public class RoadReportController {
                 try { report.setNumberOfBridges(Integer.valueOf(payload.get("numberOfBridges").toString())); } catch (Exception ignored) {}
             }
 
-            // 🔄 SYNC TO MASTER INVENTORY: Save road_width to city_roads for future auto-fills
             if (updatedWidth != null && updatedWidth > 0 && report.getCityRoadId() != null) {
                 String cleanTargetRoadId = report.getCityRoadId().replace(" ", "").trim();
                 List<CityRoad> matchedRoads = cityRoadRepository.findAll().stream()
@@ -451,7 +518,7 @@ public class RoadReportController {
                 }
             }
 
-            // 📐 RECALCULATE OFFICIAL ENGINEERING SEVERITY UPON CPDO VALIDATION
+            // 📐 RECALCULATE OFFICIAL ENGINEERING SEVERITY
             if (newStatus != null && newStatus.equalsIgnoreCase("Validated")) {
                 String calculatedSeverity = calculateEngineeringSeverity(
                         report.getDamageType(),
@@ -466,7 +533,7 @@ public class RoadReportController {
                         " (Original AI triage: " + report.getAiSeverity() + ")");
             }
 
-            // 🛡️ AUTO-ARCHIVE REPORTS WITHOUT DAMAGE EVIDENCE UPON VALIDATION
+            // 🛡️ AUTO-ARCHIVE REPORTS WITHOUT DAMAGE EVIDENCE
             boolean isAutoArchivedNoDamage = false;
             if (newStatus != null && newStatus.equalsIgnoreCase("Validated")) {
                 boolean hasNoDamageImage = report.getDamageImage() == null ||
@@ -654,6 +721,12 @@ public class RoadReportController {
                                           @RequestParam(value = "numberOfBridges", required = false) Integer numberOfBridges,
                                           @RequestParam(value = "latitude", required = false) Double latitude,
                                           @RequestParam(value = "longitude", required = false) Double longitude,
+                                          // 📸 5 Perspective Photos
+                                          @RequestParam(value = "imageWhole", required = false) MultipartFile imageWhole,
+                                          @RequestParam(value = "imageTop", required = false) MultipartFile imageTop,
+                                          @RequestParam(value = "imageLeft", required = false) MultipartFile imageLeft,
+                                          @RequestParam(value = "imageRight", required = false) MultipartFile imageRight,
+                                          @RequestParam(value = "imageClose", required = false) MultipartFile imageClose,
                                           @RequestParam(value = "imageFile", required = false) MultipartFile imageFile,
                                           HttpServletRequest request) {
         try {
@@ -668,28 +741,32 @@ public class RoadReportController {
             if (latitude != null) existingReport.setLatitude(latitude);
             if (longitude != null) existingReport.setLongitude(longitude);
 
-            // ☁️ UPLOAD TO SUPABASE & RE-RUN AI ANALYSIS IF A NEW PHOTO WAS PROVIDED
-            if (imageFile != null && !imageFile.isEmpty()) {
-                // Strict Format & 5MB Size Validation
-                String contentType = imageFile.getContentType() != null ? imageFile.getContentType().toLowerCase() : "";
-                if (!contentType.equals("image/jpeg") && !contentType.equals("image/png") && !contentType.equals("image/webp") && !contentType.equals("image/jpg")) {
-                    return ResponseEntity.badRequest().body(Map.of(
-                            "error", "PHOTO_REJECTED",
-                            "reason", "INVALID_FORMAT",
-                            "message", "Invalid file format! Please upload a JPG, PNG, or WebP photo."
-                    ));
-                }
-                if (imageFile.getSize() > 5 * 1024 * 1024) {
-                    return ResponseEntity.badRequest().body(Map.of(
-                            "error", "PHOTO_REJECTED",
-                            "reason", "FILE_TOO_LARGE",
-                            "message", "Image exceeds the 5MB size limit! Please upload a smaller photo."
-                    ));
+            boolean hasBatchPhotos = (imageWhole != null && !imageWhole.isEmpty()) && (imageTop != null && !imageTop.isEmpty());
+            boolean hasLegacyPhoto = imageFile != null && !imageFile.isEmpty();
+
+            if (hasBatchPhotos || hasLegacyPhoto) {
+                MultipartFile[] filesToValidate = hasBatchPhotos
+                        ? new MultipartFile[]{imageWhole, imageTop, imageLeft, imageRight, imageClose}
+                        : new MultipartFile[]{imageFile};
+
+                for (MultipartFile f : filesToValidate) {
+                    String validationErr = validateImageFile(f);
+                    if (validationErr != null) {
+                        return ResponseEntity.badRequest().body(Map.of(
+                                "error", "PHOTO_REJECTED",
+                                "reason", "INVALID_FILE",
+                                "message", validationErr
+                        ));
+                    }
                 }
 
                 RoadInspectionService.InspectionResult aiResult;
                 try {
-                    aiResult = aiService.analyzeSeverity(imageFile);
+                    if (hasBatchPhotos) {
+                        aiResult = aiService.analyzeBatchSeverity(imageWhole, imageTop, imageLeft, imageRight, imageClose);
+                    } else {
+                        aiResult = aiService.analyzeSeverity(imageFile);
+                    }
                 } catch (Exception e) {
                     System.err.println(">>> [AI WARNING - RESUBMISSION] Analysis failed: " + e.getMessage());
                     return ResponseEntity.badRequest().body(Map.of(
@@ -702,28 +779,48 @@ public class RoadReportController {
                 String newSeverity = aiResult != null ? aiResult.getSeverity() : "Unassessed";
                 String newStatus = aiResult != null ? aiResult.getStatus() : "UNKNOWN";
 
-                // Rejection gates on resubmission
                 if ("Undamaged".equalsIgnoreCase(newSeverity) || "UNDAMAGED".equalsIgnoreCase(newStatus)) {
                     return ResponseEntity.badRequest().body(Map.of(
                             "error", "PHOTO_REJECTED",
                             "reason", "UNDAMAGED",
-                            "message", "No road damage detected in updated photo. Please upload a photo with visible damage."
+                            "message", "No road damage detected in updated photos. Please upload photos with visible damage."
                     ));
                 }
                 if ("Unassessed".equalsIgnoreCase(newSeverity) || "LOW_CONFIDENCE".equalsIgnoreCase(newStatus) || "INVALID_SURFACE".equalsIgnoreCase(newStatus)) {
                     return ResponseEntity.badRequest().body(Map.of(
                             "error", "PHOTO_REJECTED",
                             "reason", "INVALID_OR_UNCLEAR",
-                            "message", "Updated image does not show road distress. Please upload a clear photo of road damage."
+                            "message", "Updated images do not show road distress. Please upload clear photos of road damage."
                     ));
                 }
 
-                String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
-                existingReport.setDamageImage(cloudImageUrl);
-                existingReport.setAiSeverity(newSeverity); // Update visual screening
+                if (hasBatchPhotos) {
+                    String urlWhole = supabaseStorageService.uploadImage(imageWhole);
+                    String urlTop = supabaseStorageService.uploadImage(imageTop);
+                    String urlLeft = (imageLeft != null && !imageLeft.isEmpty()) ? supabaseStorageService.uploadImage(imageLeft) : null;
+                    String urlRight = (imageRight != null && !imageRight.isEmpty()) ? supabaseStorageService.uploadImage(imageRight) : null;
+                    String urlClose = (imageClose != null && !imageClose.isEmpty()) ? supabaseStorageService.uploadImage(imageClose) : null;
+
+                    existingReport.setDamageImageWhole(urlWhole);
+                    existingReport.setDamageImageTop(urlTop);
+                    existingReport.setDamageImageLeft(urlLeft);
+                    existingReport.setDamageImageRight(urlRight);
+                    existingReport.setDamageImageClose(urlClose);
+                    existingReport.setDamageImage(urlWhole);
+                } else {
+                    String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
+                    existingReport.setDamageImage(cloudImageUrl);
+                    existingReport.setDamageImageWhole(cloudImageUrl);
+                    existingReport.setDamageImageTop(cloudImageUrl);
+                }
+
+                existingReport.setAiSeverity(newSeverity);
                 existingReport.setSeverity(newSeverity);
                 existingReport.setCvConfidenceScore(aiResult.getConfidence());
-                System.out.println(">>> [AI SUCCESS - RESUBMISSION] Re-evaluated " + imageFile.getOriginalFilename() + " as " + newSeverity + " (" + aiResult.getConfidence() + "%)");
+                if (aiResult.getDetectedDamageType() != null) {
+                    existingReport.setDamageType(aiResult.getDetectedDamageType());
+                }
+                System.out.println(">>> [AI SUCCESS - RESUBMISSION] Re-evaluated as " + newSeverity + " (" + aiResult.getConfidence() + "%)");
             }
 
             boolean isResubmitted = false;
@@ -804,7 +901,6 @@ public class RoadReportController {
                         report.setStatus("Dispatched to CEO");
                         dispatchedCount++;
 
-                        // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
                         reportStatusLogService.log(
                                 report,
                                 "DISPATCHED",
@@ -817,7 +913,6 @@ public class RoadReportController {
                                 null
                         );
                     } else {
-                        // 🛡️ Safety fallback: Auto-archive any legacy validated report lacking photo evidence
                         String prev = report.getStatus();
                         report.setStatus("Archived");
                         LocalDateTime nowPst = LocalDateTime.now(ZoneId.of("Asia/Manila"));
@@ -926,7 +1021,6 @@ public class RoadReportController {
                 r.setStatus("Pending Budget");
                 r.setRepairRemarks(reason);
 
-                // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
                 reportStatusLogService.log(
                         r,
                         "PENDING_BUDGET",
@@ -1005,7 +1099,6 @@ public class RoadReportController {
             RoadReport report = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
             String previousStatus = report.getStatus();
 
-            // ☁️ UPLOAD PROOF IMAGE DIRECTLY TO SUPABASE
             if (proofImage != null && !proofImage.isEmpty()) {
                 String cloudProofUrl = supabaseStorageService.uploadImage(proofImage);
                 report.setProofOfRepairImage(cloudProofUrl);
@@ -1015,7 +1108,6 @@ public class RoadReportController {
 
             report.setStatus("Completed");
 
-            // 🎯 STAMP DATE ARCHIVED & ACTUAL COMPLETION DATE IN PHILIPPINE STANDARD TIME (PST)
             LocalDateTime completionTime = LocalDateTime.now(ZoneId.of("Asia/Manila"));
             report.setDateArchived(completionTime);
             report.setActualCompletionDate(completionTime);
@@ -1025,7 +1117,6 @@ public class RoadReportController {
 
             User ceoActor = resolveActor(userId, getCeoId());
 
-            // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
             reportStatusLogService.log(
                     report,
                     "COMPLETED",
@@ -1089,7 +1180,6 @@ public class RoadReportController {
 
             User ceoActor = resolveActor(explicitUserId, getCeoId());
 
-            // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
             reportStatusLogService.log(
                     report,
                     "PENDING_BUDGET",
@@ -1260,12 +1350,9 @@ public class RoadReportController {
                 if ("Pending Budget".equalsIgnoreCase(r.getStatus())) {
                     String prev = r.getStatus();
                     r.setStatus("Archived");
-
-                    // 🎯 STAMP DATE ARCHIVED IN PHILIPPINE STANDARD TIME (PST)
                     r.setDateArchived(LocalDateTime.now(ZoneId.of("Asia/Manila")));
                     archivedCount++;
 
-                    // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
                     reportStatusLogService.log(
                             r,
                             "ARCHIVED",
@@ -1425,7 +1512,6 @@ public class RoadReportController {
             LocalDateTime nowPst = LocalDateTime.now(ZoneId.of("Asia/Manila"));
             LocalDate todayPst = nowPst.toLocalDate();
 
-            // 🛡️ ANTI-SPAM 12-HOUR COOLDOWN CHECK (Option A)
             if (report.getLastReminderSent() != null) {
                 LocalDateTime cooldownExpires = report.getLastReminderSent().plusHours(12);
                 if (nowPst.isBefore(cooldownExpires)) {

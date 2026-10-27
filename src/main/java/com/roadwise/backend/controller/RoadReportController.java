@@ -74,6 +74,17 @@ public class RoadReportController {
     private ReportStatusLogService reportStatusLogService;
 
     // ==========================================
+    // 🛡️ CONTROL 15: FILE UPLOAD SIZE & MIME ALLOW-LIST CONSTRAINTS
+    // ==========================================
+    private static final long MAX_FILE_SIZE = 5L * 1024 * 1024; // Strict 5MB limit
+    private static final Set<String> ALLOWED_IMAGE_TYPES = Set.of(
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "image/jpg"
+    );
+
+    // ==========================================
     // 🛡️ CONTROL 12: SAN JOSE DEL MONTE GEOGRAPHIC BOUNDING BOX
     // ==========================================
     private static final double CSJDM_MIN_LAT = 14.7500;
@@ -247,16 +258,25 @@ public class RoadReportController {
         }
     }
 
-    // Helper: Validates image size and type
+    // ==========================================
+    // 🛡️ CONTROL 15: IMAGE VALIDATION HELPER (SIZE & ALLOW-LIST)
+    // ==========================================
     private String validateImageFile(MultipartFile file) {
         if (file == null || file.isEmpty()) return null;
-        String contentType = file.getContentType() != null ? file.getContentType().toLowerCase() : "";
-        if (!contentType.equals("image/jpeg") && !contentType.equals("image/png") && !contentType.equals("image/webp") && !contentType.equals("image/jpg")) {
-            return "Invalid file format for '" + file.getOriginalFilename() + "'! Please upload JPG, PNG, or WebP.";
+
+        // 1. Strict 5MB file size limit
+        if (file.getSize() > MAX_FILE_SIZE) {
+            String filename = file.getOriginalFilename() != null ? file.getOriginalFilename() : "Upload";
+            return "Image '" + filename + "' exceeds the strict 5MB size limit!";
         }
-        if (file.getSize() > (5L * 1024 * 1024)) {
-            return "Image '" + file.getOriginalFilename() + "' exceeds the 5MB size limit!";
+
+        // 2. Format allow-list check
+        String contentType = file.getContentType() != null ? file.getContentType().toLowerCase().trim() : "";
+        if (!ALLOWED_IMAGE_TYPES.contains(contentType)) {
+            String filename = file.getOriginalFilename() != null ? file.getOriginalFilename() : "Upload";
+            return "Invalid file format for '" + filename + "'! Please upload JPG, PNG, or WebP.";
         }
+
         return null;
     }
 
@@ -352,6 +372,7 @@ public class RoadReportController {
                         ? new MultipartFile[]{imageWhole, imageTop, imageLeft, imageRight, imageClose}
                         : new MultipartFile[]{imageFile};
 
+                // 🛡️ CONTROL 15: Validate each photo against 5MB and image allow-list
                 for (MultipartFile f : filesToValidate) {
                     String validationErr = validateImageFile(f);
                     if (validationErr != null) {
@@ -933,6 +954,7 @@ public class RoadReportController {
                         ? new MultipartFile[]{imageWhole, imageTop, imageLeft, imageRight, imageClose}
                         : new MultipartFile[]{imageFile};
 
+                // 🛡️ CONTROL 15: Validate each photo against 5MB and image allow-list
                 for (MultipartFile f : filesToValidate) {
                     String validationErr = validateImageFile(f);
                     if (validationErr != null) {
@@ -1298,13 +1320,28 @@ public class RoadReportController {
                 return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Only the City Engineering Office (CEO) can submit repair proof and mark projects as Completed."));
             }
 
+            // 🛡️ CONTROL 15: Validate Proof of Repair Photo (Size <= 5MB and Image Allow-list)
+            if (proofImage == null || proofImage.isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "PHOTO_REJECTED",
+                        "message", "Proof of repair photo is mandatory."
+                ));
+            }
+
+            String proofValidationErr = validateImageFile(proofImage);
+            if (proofValidationErr != null) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "PHOTO_REJECTED",
+                        "reason", "INVALID_FILE",
+                        "message", proofValidationErr
+                ));
+            }
+
             RoadReport report = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
             String previousStatus = report.getStatus();
 
-            if (proofImage != null && !proofImage.isEmpty()) {
-                String cloudProofUrl = supabaseStorageService.uploadImage(proofImage);
-                report.setProofOfRepairImage(cloudProofUrl);
-            }
+            String cloudProofUrl = supabaseStorageService.uploadImage(proofImage);
+            report.setProofOfRepairImage(cloudProofUrl);
 
             if (repairRemarks != null) report.setRepairRemarks(repairRemarks);
 

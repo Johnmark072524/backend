@@ -74,6 +74,35 @@ public class RoadReportController {
     private ReportStatusLogService reportStatusLogService;
 
     // ==========================================
+    // 🛡️ CONTROL 12: SAN JOSE DEL MONTE GEOGRAPHIC BOUNDING BOX
+    // ==========================================
+    private static final double CSJDM_MIN_LAT = 14.7500;
+    private static final double CSJDM_MAX_LAT = 14.9200;
+    private static final double CSJDM_MIN_LNG = 121.0000;
+    private static final double CSJDM_MAX_LNG = 121.1800;
+
+    private boolean isWithinCsjdmBounds(Double lat, Double lng) {
+        if (lat == null || lng == null) return true; // Coordinates optional or unpinned
+        if (lat == 0.0 && lng == 0.0) return true;  // Unpinned fallback
+        return lat >= CSJDM_MIN_LAT && lat <= CSJDM_MAX_LAT &&
+                lng >= CSJDM_MIN_LNG && lng <= CSJDM_MAX_LNG;
+    }
+
+    // 🛡️ CONTROL 12: NON-NEGATIVE NUMERIC VALIDATOR
+    private String validateNonNegativeDimensions(Double length, Double width, Double depth,
+                                                 Double rLength, Double rWidth,
+                                                 Double culverts, Integer bridges) {
+        if (length != null && length < 0) return "Damage length cannot be negative.";
+        if (width != null && width < 0) return "Damage width cannot be negative.";
+        if (depth != null && depth < 0) return "Damage depth cannot be negative.";
+        if (rLength != null && rLength < 0) return "Road length cannot be negative.";
+        if (rWidth != null && rWidth < 0) return "Road width cannot be negative.";
+        if (culverts != null && culverts < 0) return "Length of culverts cannot be negative.";
+        if (bridges != null && bridges < 0) return "Number of bridges cannot be negative.";
+        return null;
+    }
+
+    // ==========================================
     // 🛡️ CONTROL 6: SERVER-SIDE RBAC ROLE CHECKERS
     // ==========================================
     private User resolveUser(Long userId) {
@@ -105,14 +134,12 @@ public class RoadReportController {
     private String validateRoadTerritory(String roadId, Long targetBarangayId, User callingUser) {
         if (callingUser == null) return "User identity required.";
 
-        // If the actor is a Barangay Official, enforce their account's assigned barangay
         if (isBarangayOfficial(callingUser)) {
             if (callingUser.getBarangay() == null || !callingUser.getBarangay().getId().equals(targetBarangayId)) {
                 return "Security Violation: You are not authorized to submit reports outside your assigned barangay jurisdiction.";
             }
         }
 
-        // Validate that the physical road belongs to targetBarangayId
         if (roadId != null && !roadId.trim().isEmpty()) {
             String cleanId = roadId.replace(" ", "").trim();
             Optional<CityRoad> matchedRoad = cityRoadRepository.findAll().stream()
@@ -127,7 +154,7 @@ public class RoadReportController {
                 }
             }
         }
-        return null; // Valid
+        return null;
     }
 
     // ==========================================
@@ -176,17 +203,14 @@ public class RoadReportController {
         boolean isCoreRoad = roadImportance != null &&
                 roadImportance.trim().equalsIgnoreCase("Core");
 
-        // 🚨 OVERRIDE RULE 1: Catastrophic road cuts/sinkholes/washouts are immediate HIGH
         if (type.contains("sinkhole") || type.contains("washout")) {
             return "High";
         }
 
-        // 🚨 OVERRIDE RULE 2: Deep potholes on Core arterial corridors are immediate HIGH
         if (type.contains("pothole") && dDepth >= 0.08 && isCoreRoad) {
             return "High";
         }
 
-        // 1. BASE DAMAGE TYPE HAZARD WEIGHT
         int score = 0;
         if (type.contains("pothole")) {
             score += 4;
@@ -198,7 +222,6 @@ public class RoadReportController {
             score += 2;
         }
 
-        // 2. DIMENSION MULTIPLIER (Depth & Surface Area Thresholds)
         if (dDepth >= 0.12) {
             score += 3;
         } else if (dDepth >= 0.06) {
@@ -211,12 +234,10 @@ public class RoadReportController {
             score += 1;
         }
 
-        // 3. ROAD IMPORTANCE EXPOSURE FACTOR (Core vs. Non-Core)
         if (isCoreRoad) {
             score += 2;
         }
 
-        // 4. FINAL RESOLUTION MAPPING
         if (score >= 7) {
             return "High";
         } else if (score >= 4) {
@@ -264,6 +285,27 @@ public class RoadReportController {
                 return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Valid user identity is required to submit road reports."));
             }
 
+            // 🛡️ CONTROL 12: Positive Numeric & Dimension Validation
+            String dimError = validateNonNegativeDimensions(
+                    report.getDamageLength(), report.getDamageWidth(), report.getDamageDepth(),
+                    report.getLength(), report.getWidth(), report.getLengthOfCulverts(), report.getNumberOfBridges()
+            );
+            if (dimError != null) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "INVALID_NUMERIC_INPUT",
+                        "message", dimError
+                ));
+            }
+
+            // 🛡️ CONTROL 12: Geographic Boundary Validation (San Jose del Monte Bounds)
+            if (!isWithinCsjdmBounds(report.getLatitude(), report.getLongitude())) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "OUT_OF_BOUNDS_COORDINATES",
+                        "message", "Validation Error: GPS coordinates (" + report.getLatitude() + ", " + report.getLongitude() +
+                                ") fall outside the territorial jurisdiction boundaries of San Jose del Monte City."
+                ));
+            }
+
             // 🛡️ CONTROL 7 SCOPING CHECK: Prevent cross-barangay record pollution
             if (barangayId != null) {
                 String territoryError = validateRoadTerritory(report.getCityRoadId(), barangayId, callingUser);
@@ -296,7 +338,7 @@ public class RoadReportController {
             boolean hasBatchPhotos = (imageWhole != null && !imageWhole.isEmpty()) && (imageTop != null && !imageTop.isEmpty());
             boolean hasLegacyPhoto = imageFile != null && !imageFile.isEmpty();
 
-            // 🛡️ GUARD: If the user attempted a multi-angle submission but missed a mandatory angle
+            // 🛡️ GUARD: Both Whole and Top-Down angles are mandatory when photos are submitted
             if (hasAnyAngle && !hasBatchPhotos) {
                 return ResponseEntity.badRequest().body(Map.of(
                         "error", "PHOTO_REJECTED",
@@ -495,7 +537,7 @@ public class RoadReportController {
     // 2. THE EMAIL SWITCHBOARD & STATUS UPDATES (CPDO / CEO)
     // ==========================================
     @PutMapping("/{id}/status")
-    public ResponseEntity<String> updateReportStatus(
+    public ResponseEntity<?> updateReportStatus(
             @PathVariable Long id,
             @RequestBody Map<String, Object> payload,
             HttpServletRequest request) {
@@ -544,53 +586,70 @@ public class RoadReportController {
             }
         }
 
-        // 📐 CAPTURE CPDO TECHNICAL DAMAGE ASSESSMENT
+        // 📐 CAPTURE CPDO TECHNICAL DAMAGE ASSESSMENT & ENFORCE NON-NEGATIVE VALUES
+        Double dLength = null, dWidth = null, dDepth = null;
+        if (payload.get("damageLength") != null) {
+            try { dLength = Double.valueOf(payload.get("damageLength").toString()); } catch (Exception ignored) {}
+        }
+        if (payload.get("damageWidth") != null) {
+            try { dWidth = Double.valueOf(payload.get("damageWidth").toString()); } catch (Exception ignored) {}
+        }
+        if (payload.get("damageDepth") != null) {
+            try { dDepth = Double.valueOf(payload.get("damageDepth").toString()); } catch (Exception ignored) {}
+        }
+
+        Double rWidth = null, rLength = null, culverts = null;
+        Integer bridges = null;
+        if (payload.get("width") != null) {
+            try { rWidth = Double.valueOf(payload.get("width").toString()); } catch (Exception ignored) {}
+        }
+        if (payload.get("length") != null) {
+            try { rLength = Double.valueOf(payload.get("length").toString()); } catch (Exception ignored) {}
+        }
+        if (payload.get("lengthOfCulverts") != null) {
+            try { culverts = Double.valueOf(payload.get("lengthOfCulverts").toString()); } catch (Exception ignored) {}
+        }
+        if (payload.get("numberOfBridges") != null) {
+            try { bridges = Integer.valueOf(payload.get("numberOfBridges").toString()); } catch (Exception ignored) {}
+        }
+
+        // 🛡️ CONTROL 12: Positive Numeric Validator
+        String dimError = validateNonNegativeDimensions(dLength, dWidth, dDepth, rLength, rWidth, culverts, bridges);
+        if (dimError != null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "INVALID_NUMERIC_INPUT",
+                    "message", dimError
+            ));
+        }
+
         if (payload.get("damageType") != null) {
             report.setDamageType(payload.get("damageType").toString());
         }
-        if (payload.get("damageLength") != null) {
-            try { report.setDamageLength(Double.valueOf(payload.get("damageLength").toString())); } catch (Exception ignored) {}
-        }
-        if (payload.get("damageWidth") != null) {
-            try { report.setDamageWidth(Double.valueOf(payload.get("damageWidth").toString())); } catch (Exception ignored) {}
-        }
-        if (payload.get("damageDepth") != null) {
-            try { report.setDamageDepth(Double.valueOf(payload.get("damageDepth").toString())); } catch (Exception ignored) {}
-        }
+        if (dLength != null) report.setDamageLength(dLength);
+        if (dWidth != null) report.setDamageWidth(dWidth);
+        if (dDepth != null) report.setDamageDepth(dDepth);
 
-        // 🛣️ CAPTURE ROAD DIMENSIONS & SYNC WITH MASTER INVENTORY
-        Double updatedWidth = null;
-        if (payload.get("width") != null) {
-            try {
-                updatedWidth = Double.valueOf(payload.get("width").toString());
-                report.setWidth(updatedWidth);
-            } catch (Exception ignored) {}
-        }
-        if (payload.get("length") != null) {
-            try { report.setLength(Double.valueOf(payload.get("length").toString())); } catch (Exception ignored) {}
-        }
-        if (payload.get("lengthOfCulverts") != null) {
-            try { report.setLengthOfCulverts(Double.valueOf(payload.get("lengthOfCulverts").toString())); } catch (Exception ignored) {}
-        }
-        if (payload.get("numberOfBridges") != null) {
-            try { report.setNumberOfBridges(Integer.valueOf(payload.get("numberOfBridges").toString())); } catch (Exception ignored) {}
-        }
+        // 🛣️ SYNC ROAD METRICS WITH MASTER INVENTORY
+        if (rWidth != null) report.setWidth(rWidth);
+        if (rLength != null) report.setLength(rLength);
+        if (culverts != null) report.setLengthOfCulverts(culverts);
+        if (bridges != null) report.setNumberOfBridges(bridges);
 
-        if (updatedWidth != null && updatedWidth > 0 && report.getCityRoadId() != null) {
+        if (rWidth != null && rWidth > 0 && report.getCityRoadId() != null) {
             String cleanTargetRoadId = report.getCityRoadId().replace(" ", "").trim();
             List<CityRoad> matchedRoads = cityRoadRepository.findAll().stream()
                     .filter(cr -> cr.getRoadId() != null && cr.getRoadId().replace(" ", "").trim().equalsIgnoreCase(cleanTargetRoadId))
                     .toList();
 
             for (CityRoad cr : matchedRoads) {
-                cr.setRoadWidth(updatedWidth);
+                cr.setRoadWidth(rWidth);
                 if (report.getLength() != null && report.getLength() > 0) cr.setRoadLength(report.getLength());
                 if (report.getLengthOfCulverts() != null) cr.setLengthOfCulverts(report.getLengthOfCulverts());
                 if (report.getNumberOfBridges() != null) cr.setNumberOfBridges(report.getNumberOfBridges());
             }
             if (!matchedRoads.isEmpty()) {
                 cityRoadRepository.saveAll(matchedRoads);
-                System.out.println(">>> [SYNC SUCCESS] Master CityRoad record '" + report.getCityRoadId() + "' updated with Road Width: " + updatedWidth + "m");
+                System.out.println(">>> [SYNC SUCCESS] Master CityRoad record '" + report.getCityRoadId() + "' updated with Road Width: " + rWidth + "m");
             }
         }
 
@@ -823,6 +882,23 @@ public class RoadReportController {
                 }
             }
 
+            // 🛡️ CONTROL 12: Positive Numeric & Dimension Validation
+            String dimError = validateNonNegativeDimensions(null, null, null, length, width, lengthOfCulverts, numberOfBridges);
+            if (dimError != null) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "INVALID_NUMERIC_INPUT",
+                        "message", dimError
+                ));
+            }
+
+            // 🛡️ CONTROL 12: Geographic Boundary Validation
+            if (!isWithinCsjdmBounds(latitude, longitude)) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "OUT_OF_BOUNDS_COORDINATES",
+                        "message", "Validation Error: GPS coordinates fall outside the territorial jurisdiction boundaries of San Jose del Monte City."
+                ));
+            }
+
             String previousStatus = existingReport.getStatus();
 
             if (description != null) existingReport.setDamageDescription(description);
@@ -843,7 +919,7 @@ public class RoadReportController {
             boolean hasBatchPhotos = (imageWhole != null && !imageWhole.isEmpty()) && (imageTop != null && !imageTop.isEmpty());
             boolean hasLegacyPhoto = imageFile != null && !imageFile.isEmpty();
 
-            // 🛡️ GUARD: If the official tries to update photos but misses a mandatory angle
+            // 🛡️ GUARD: Both Whole and Top-Down angles are mandatory when photos are updated
             if (hasAnyAngle && !hasBatchPhotos) {
                 return ResponseEntity.badRequest().body(Map.of(
                         "error", "PHOTO_REJECTED",

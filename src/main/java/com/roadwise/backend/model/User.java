@@ -1,6 +1,7 @@
 package com.roadwise.backend.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -17,6 +18,8 @@ public class User {
     @Column(nullable = false, unique = true)
     private String username;
 
+    // 🛡️ CONTROL 18: Prevent password leakage during JSON serialization
+    @JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
     @Column(nullable = false)
     private String password;
 
@@ -40,7 +43,7 @@ public class User {
 
     // 🔒 RATE LIMITING & SECURITY LOCKOUT
     @Column(name = "failed_login_attempts")
-    private Integer failedLoginAttempts = 0; // Changed to Integer to safely handle DB nulls for legacy accounts
+    private Integer failedLoginAttempts = 0;
 
     @Column(name = "lockout_until")
     private LocalDateTime lockoutUntil;

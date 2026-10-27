@@ -91,7 +91,7 @@ public class AuthController {
     private static final Map<Long, MfaSession> resetTracker = new ConcurrentHashMap<>();
 
     // ==========================================
-    // 🕒 SERVER-SIDE SESSION LIFECYCLE TRACKER
+    // 🕒 SERVER-SIDE SESSION LIFECYCLE TRACKER (CONTROL 9 & 10)
     // ==========================================
     private static class ActiveSession {
         LocalDateTime loginTime;
@@ -326,6 +326,7 @@ public class AuthController {
         }
         User user = userOpt.get();
 
+        // 🚀 CONTROL 9 & 10: Initialize Server-Side Session Tracking
         activeSessionTracker.put(user.getId(), new ActiveSession(LocalDateTime.now(), LocalDateTime.now()));
 
         activityLogService.log(user, "AUTH", "AUTH_LOGIN_SUCCESS", String.format("#USR-%04d", user.getId()),
@@ -471,7 +472,7 @@ public class AuthController {
     }
 
     // ==========================================
-    // 7. SERVER-SIDE SESSION VERIFICATION & TIMEOUT AUDIT
+    // 7. SERVER-SIDE SESSION VERIFICATION & TIMEOUT AUDIT (CONTROL 9, 10 & 11)
     // ==========================================
     @PostMapping("/verify-session")
     public ResponseEntity<?> verifySession(@RequestBody Map<String, Object> payload, HttpServletRequest request) {
@@ -496,11 +497,13 @@ public class AuthController {
 
         User user = userOpt.get();
 
+        // 🛡️ Live Database Status Check (Suspended/Deactivated)
         if ("Suspended".equalsIgnoreCase(user.getStatus()) || "Deactivated".equalsIgnoreCase(user.getStatus())) {
             activeSessionTracker.remove(userId);
             return ResponseEntity.status(403).body(Map.of("valid", false, "error", "Account access revoked."));
         }
 
+        // 🛡️ Anti-Role Spoofing Verification
         if (!user.getRole().equalsIgnoreCase(claimedRole)) {
             activeSessionTracker.remove(userId);
             activityLogService.log(
@@ -518,23 +521,31 @@ public class AuthController {
         LocalDateTime now = LocalDateTime.now();
         ActiveSession session = activeSessionTracker.get(userId);
 
-        if (session != null) {
-            if (Duration.between(session.loginTime, now).toHours() >= 8) {
-                activeSessionTracker.remove(userId);
-                activityLogService.log(user, "AUTH", "AUTH_SESSION_EXPIRED", String.format("#USR-%04d", user.getId()), "Session expired: Reached 8-hour maximum shift limit.", "INFO", request);
-                return ResponseEntity.status(401).body(Map.of("valid", false, "error", "EXPIRED_ABSOLUTE", "message", "Your 8-hour shift session has ended. Please log in again."));
-            }
-
-            if (Duration.between(session.lastActiveTime, now).toMinutes() >= 15) {
-                activeSessionTracker.remove(userId);
-                activityLogService.log(user, "AUTH", "AUTH_SESSION_TIMEOUT", String.format("#USR-%04d", user.getId()), "Session expired: Inactive for 15 minutes.", "INFO", request);
-                return ResponseEntity.status(401).body(Map.of("valid", false, "error", "EXPIRED_IDLE", "message", "Session timed out due to 15 minutes of inactivity."));
-            }
-
-            session.lastActiveTime = now;
-        } else {
-            activeSessionTracker.put(userId, new ActiveSession(now, now));
+        // 🛡️ CONTROL 11 ENFORCEMENT: Reject if session was evicted by logout or never logged in
+        if (session == null) {
+            return ResponseEntity.status(401).body(Map.of(
+                    "valid", false,
+                    "error", "SESSION_EVICTED",
+                    "message", "Session has been terminated or expired on the server. Please log in again."
+            ));
         }
+
+        // 🕒 Hard Shift Cap Check (8 Hours)
+        if (Duration.between(session.loginTime, now).toHours() >= 8) {
+            activeSessionTracker.remove(userId);
+            activityLogService.log(user, "AUTH", "AUTH_SESSION_EXPIRED", String.format("#USR-%04d", user.getId()), "Session expired: Reached 8-hour maximum shift limit.", "INFO", request);
+            return ResponseEntity.status(401).body(Map.of("valid", false, "error", "EXPIRED_ABSOLUTE", "message", "Your 8-hour shift session has ended. Please log in again."));
+        }
+
+        // 🕒 Sliding Inactivity Window Check (15 Minutes)
+        if (Duration.between(session.lastActiveTime, now).toMinutes() >= 15) {
+            activeSessionTracker.remove(userId);
+            activityLogService.log(user, "AUTH", "AUTH_SESSION_TIMEOUT", String.format("#USR-%04d", user.getId()), "Session expired: Inactive for 15 minutes.", "INFO", request);
+            return ResponseEntity.status(401).body(Map.of("valid", false, "error", "EXPIRED_IDLE", "message", "Session timed out due to 15 minutes of inactivity."));
+        }
+
+        // ✅ ACTIVE RENEWAL: Advance sliding clock
+        session.lastActiveTime = now;
 
         Map<String, Object> result = new HashMap<>();
         result.put("valid", true);
@@ -544,8 +555,8 @@ public class AuthController {
         return ResponseEntity.ok(result);
     }
 
-    // =========================================
-    // 8. SESSION LOGOUT & CLEANUP
+    // ==========================================
+    // 8. SESSION LOGOUT & CLEANUP (CONTROL 9 & 10)
     // ==========================================
     @PostMapping("/logout")
     public ResponseEntity<?> logout(@RequestBody(required = false) Map<String, Object> payload, HttpServletRequest request) {

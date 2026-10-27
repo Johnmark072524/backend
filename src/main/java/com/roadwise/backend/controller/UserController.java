@@ -11,6 +11,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -19,6 +20,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 @RestController
 @RequestMapping("/api/users")
@@ -44,9 +46,20 @@ public class UserController {
     @Autowired
     private SupabaseStorageService supabaseStorageService;
 
+    // 🔒 INJECT BCRYPT PASSWORD ENCODER
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
     // 🌐 DYNAMIC FRONTEND DOMAIN INJECTION
     @Value("${frontend.url:https://roadwise-csjdm.com}")
     private String frontendUrl;
+
+    // 🛡️ CONTROL 2: STRICT PASSWORD COMPLEXITY REGEX (8+ chars, 1 uppercase, 1 digit, 1 special character)
+    private static final Pattern PASSWORD_PATTERN = Pattern.compile("^(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&#]).{8,}$");
+
+    private boolean isValidPassword(String password) {
+        return password != null && PASSWORD_PATTERN.matcher(password).matches();
+    }
 
     // ==========================================
     // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
@@ -139,7 +152,7 @@ public class UserController {
     }
 
     // ==========================================
-    // 3. SECURE PASSWORD UPDATE (1-HOUR LOCKOUT)
+    // 3. SECURE PASSWORD UPDATE (1-HOUR LOCKOUT & COMPLEXITY ENFORCEMENT)
     // ==========================================
     private static class AttemptTracker {
         int attempts = 0;
@@ -161,6 +174,12 @@ public class UserController {
         String currentPassword = payload.get("currentPassword");
         String newPassword = payload.get("newPassword");
 
+        // 🛡️ CONTROL 2 ENFORCEMENT: Reject weak passwords at API boundary
+        if (!isValidPassword(newPassword)) {
+            return ResponseEntity.status(400).body(Map.of("error",
+                    "Password does not meet complexity requirements. It must be at least 8 characters long and contain at least one uppercase letter, one digit, and one special character (@$!%*?&#)."));
+        }
+
         AttemptTracker tracker = securityTracker.computeIfAbsent(id, k -> new AttemptTracker());
 
         if (tracker.attempts >= 5 && tracker.lockoutTime != null) {
@@ -174,7 +193,19 @@ public class UserController {
             }
         }
 
-        if (!user.getPassword().equals(currentPassword)) {
+        // 🔒 SMART PASSWORD VERIFICATION (BCrypt with legacy fallback)
+        boolean currentMatches = false;
+        String storedPassword = user.getPassword();
+
+        if (storedPassword != null && (storedPassword.startsWith("$2a$") || storedPassword.startsWith("$2b$") || storedPassword.startsWith("$2y$"))) {
+            currentMatches = passwordEncoder.matches(currentPassword, storedPassword);
+        } else {
+            if (storedPassword != null && storedPassword.equals(currentPassword)) {
+                currentMatches = true;
+            }
+        }
+
+        if (!currentMatches) {
             tracker.attempts++;
             if (tracker.attempts >= 5) {
                 tracker.lockoutTime = LocalDateTime.now();
@@ -196,7 +227,8 @@ public class UserController {
         }
 
         securityTracker.remove(id);
-        user.setPassword(newPassword);
+        // 🔒 Store strictly salted BCrypt hash
+        user.setPassword(passwordEncoder.encode(newPassword));
         userRepository.save(user);
 
         activityLogService.log(
@@ -243,13 +275,22 @@ public class UserController {
             return ResponseEntity.status(400).body(Map.of("error", "Username already exists!"));
         }
 
+        String rawPassword = payload.get("password");
+
+        // 🛡️ CONTROL 2 ENFORCEMENT: Reject weak provisioning passwords
+        if (!isValidPassword(rawPassword)) {
+            return ResponseEntity.status(400).body(Map.of("error",
+                    "Password does not meet complexity requirements. It must be at least 8 characters long and contain at least one uppercase letter, one digit, and one special character (@$!%*?&#)."));
+        }
+
         User newUser = new User();
         newUser.setFirstName(payload.get("firstName"));
         newUser.setMiddleName(payload.get("middleName"));
         newUser.setLastName(payload.get("lastName"));
         newUser.setEmail(payload.get("email"));
         newUser.setUsername(username);
-        newUser.setPassword(payload.get("password"));
+        // 🔒 Store salted BCrypt hash in DB
+        newUser.setPassword(passwordEncoder.encode(rawPassword));
         newUser.setRole(payload.get("role"));
         newUser.setStatus("Active");
 
@@ -279,12 +320,13 @@ public class UserController {
                 "ACCOUNT"
         );
 
+        // 📧 Email receives the raw temporary password so the human official can log in
         if (savedUser.getEmail() != null && !savedUser.getEmail().isEmpty()) {
             String subject = "Welcome to RoadWise - Your Account Credentials";
             String emailBody = "Hello " + savedUser.getFirstName() + ",\n\n" +
                     "Your official RoadWise Barangay Official account has been provisioned.\n\n" +
                     "Username: " + savedUser.getUsername() + "\n" +
-                    "Temporary Password: " + savedUser.getPassword() + "\n\n" +
+                    "Temporary Password: " + rawPassword + "\n\n" +
                     "Please log in here: " + frontendUrl + "/login.html\n\n" +
                     "For security purposes, please change your password immediately after logging in.\n\n" +
                     "Best regards,\nCPDO Administrator - RoadWise SJDM";
@@ -408,7 +450,12 @@ public class UserController {
         }
 
         User user = userOpt.get();
-        user.setPassword("RoadWise2026!");
+        // 🔒 Store salted BCrypt hash of default password ("RoadWise2026!" strictly meets complexity requirements)
+        user.setPassword(passwordEncoder.encode("RoadWise2026!"));
+
+        // 🛡️ UNLOCK ACCOUNT: Clear lockout penalty and reset failed attempts
+        user.setFailedLoginAttempts(0);
+        user.setLockoutUntil(null);
         userRepository.save(user);
 
         notificationService.sendNotification(
@@ -427,12 +474,12 @@ public class UserController {
                 "AUTH",
                 "ADMIN_EMERGENCY_PASSWORD_RESET",
                 "#USR-" + user.getId(),
-                "Admin performed emergency default password reset for " + user.getFirstName() + " " + user.getLastName() + ".",
+                "Admin performed emergency default password reset and lockout clearance for " + user.getFirstName() + " " + user.getLastName() + ".",
                 "WARNING",
                 request
         );
 
-        return ResponseEntity.ok(Map.of("message", "Password successfully reset to default."));
+        return ResponseEntity.ok(Map.of("message", "Password successfully reset to default and account unlocked."));
     }
 
     // ==========================================
@@ -465,8 +512,19 @@ public class UserController {
 
         User currentAdmin = currentAdminOpt.get();
 
-        // 🛡️ 1. SECURITY CHECK: Verify Outgoing Admin Password
-        if (!currentAdmin.getPassword().equals(currentPassword)) {
+        // 🛡️ 1. SECURITY CHECK: Verify Outgoing Admin Password (BCrypt with fallback)
+        boolean adminMatches = false;
+        String storedAdminPass = currentAdmin.getPassword();
+
+        if (storedAdminPass != null && (storedAdminPass.startsWith("$2a$") || storedAdminPass.startsWith("$2b$") || storedAdminPass.startsWith("$2y$"))) {
+            adminMatches = passwordEncoder.matches(currentPassword, storedAdminPass);
+        } else {
+            if (storedAdminPass != null && storedAdminPass.equals(currentPassword)) {
+                adminMatches = true;
+            }
+        }
+
+        if (!adminMatches) {
             activityLogService.log(
                     currentAdmin,
                     "SECURITY",
@@ -488,7 +546,7 @@ public class UserController {
             return ResponseEntity.badRequest().body(Map.of("error", "Official email '" + newEmail + "' is already registered to another user."));
         }
 
-        // 🛡️ 3. GENERATE SECURE TEMPORARY CREDENTIALS
+        // 🛡️ 3. GENERATE SECURE TEMPORARY CREDENTIALS (Meets complexity: RoadWise@XXXX!)
         String tempPassword = "RoadWise@" + (1000 + new Random().nextInt(9000)) + "!";
 
         // 4. PROVISION INCOMING SUCCESSOR
@@ -499,7 +557,8 @@ public class UserController {
         newAdmin.setEmail(newEmail != null ? newEmail.trim() : "");
         newAdmin.setUsername(newUsername != null ? newUsername.trim() : "");
         newAdmin.setPhoneNumber(newPhone != null ? newPhone.trim() : "");
-        newAdmin.setPassword(tempPassword);
+        // 🔒 Store salted BCrypt hash
+        newAdmin.setPassword(passwordEncoder.encode(tempPassword));
         newAdmin.setRole("CPDO Admin");
         newAdmin.setStatus("Active");
         newAdmin.setFailedLoginAttempts(0);
@@ -583,8 +642,19 @@ public class UserController {
 
         User currentCeo = currentCeoOpt.get();
 
-        // 🛡️ 1. SECURITY CHECK: Verify Outgoing CEO Password
-        if (!currentCeo.getPassword().equals(currentPassword)) {
+        // 🛡️ 1. SECURITY CHECK: Verify Outgoing CEO Password (BCrypt with fallback)
+        boolean ceoMatches = false;
+        String storedCeoPass = currentCeo.getPassword();
+
+        if (storedCeoPass != null && (storedCeoPass.startsWith("$2a$") || storedCeoPass.startsWith("$2b$") || storedCeoPass.startsWith("$2y$"))) {
+            ceoMatches = passwordEncoder.matches(currentPassword, storedCeoPass);
+        } else {
+            if (storedCeoPass != null && storedCeoPass.equals(currentPassword)) {
+                ceoMatches = true;
+            }
+        }
+
+        if (!ceoMatches) {
             activityLogService.log(
                     currentCeo,
                     "SECURITY",
@@ -606,7 +676,7 @@ public class UserController {
             return ResponseEntity.badRequest().body(Map.of("error", "Official email '" + newEmail + "' is already registered to another user."));
         }
 
-        // 🛡️ 3. GENERATE SECURE TEMPORARY CREDENTIALS
+        // 🛡️ 3. GENERATE SECURE TEMPORARY CREDENTIALS (Meets complexity: RoadWise@XXXX!)
         String tempPassword = "RoadWise@" + (1000 + new Random().nextInt(9000)) + "!";
 
         // 4. PROVISION INCOMING SUCCESSOR
@@ -617,7 +687,8 @@ public class UserController {
         newCeo.setEmail(newEmail != null ? newEmail.trim() : "");
         newCeo.setUsername(newUsername != null ? newUsername.trim() : "");
         newCeo.setPhoneNumber(newPhone != null ? newPhone.trim() : "");
-        newCeo.setPassword(tempPassword);
+        // 🔒 Store salted BCrypt hash
+        newCeo.setPassword(passwordEncoder.encode(tempPassword));
         newCeo.setRole(currentCeo.getRole() != null ? currentCeo.getRole() : "ENGINEER");
         newCeo.setStatus("Active");
         newCeo.setFailedLoginAttempts(0);

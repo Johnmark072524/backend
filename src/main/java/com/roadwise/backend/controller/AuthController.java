@@ -10,6 +10,7 @@ import com.roadwise.backend.service.NotificationService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Duration;
@@ -19,6 +20,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -39,6 +41,17 @@ public class AuthController {
 
     @Autowired
     private ActivityLogService activityLogService;
+
+    // 🔒 INJECT BCRYPT PASSWORD ENCODER
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
+    // 🛡️ STRICT PASSWORD COMPLEXITY REGEX
+    private static final Pattern PASSWORD_PATTERN = Pattern.compile("^(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&#]).{8,}$");
+
+    private boolean isValidPassword(String password) {
+        return password != null && PASSWORD_PATTERN.matcher(password).matches();
+    }
 
     // ==========================================
     // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
@@ -61,15 +74,17 @@ public class AuthController {
     private static final Map<String, LoginAttemptTracker> loginTracker = new ConcurrentHashMap<>();
 
     // ==========================================
-    // 2. MFA & OTP TRACKER
+    // 2. MFA & OTP TRACKER (WITH 3-ATTEMPT LOCKOUT)
     // ==========================================
     private static class MfaSession {
         String otp;
         LocalDateTime expiryTime;
+        int failedAttempts = 0; // 🛡️ CONTROL A3: Tracks failed guess attempts
 
         public MfaSession(String otp, LocalDateTime expiryTime) {
             this.otp = otp;
             this.expiryTime = expiryTime;
+            this.failedAttempts = 0;
         }
     }
     private static final Map<Long, MfaSession> mfaTracker = new ConcurrentHashMap<>();
@@ -90,7 +105,7 @@ public class AuthController {
     private static final Map<Long, ActiveSession> activeSessionTracker = new ConcurrentHashMap<>();
 
     // ==========================================
-    // 3. CREDENTIALS & PROGRESSIVE LOCKOUT
+    // 3. CREDENTIALS & PROGRESSIVE EXPONENTIAL LOCKOUT
     // ==========================================
     @PostMapping("/login")
     public ResponseEntity<?> login(@RequestBody Map<String, String> credentials, HttpServletRequest request) {
@@ -104,42 +119,80 @@ public class AuthController {
         Optional<User> userOpt = userRepository.findByUsername(username)
                 .or(() -> userRepository.findByEmail(username));
 
-        // BRANCH A: USER DOES NOT EXIST
+        // BRANCH A: USER DOES NOT EXIST (In-memory throttle to protect DB from spray attacks)
         if (userOpt.isEmpty()) {
             LoginAttemptTracker tracker = loginTracker.computeIfAbsent(username, k -> new LoginAttemptTracker());
 
             if (tracker.lockoutTime != null && LocalDateTime.now().isBefore(tracker.lockoutTime)) {
-                return ResponseEntity.status(429).body(Map.of("error", "Too many attempts. Account temporarily rate-limited for security."));
+                long secondsLeft = Duration.between(LocalDateTime.now(), tracker.lockoutTime).getSeconds() + 1;
+                return ResponseEntity.status(429).body(Map.of(
+                        "error", "Too many attempts. Account temporarily rate-limited for security. Please try again in " + secondsLeft + " second(s).",
+                        "retryAfterSeconds", secondsLeft
+                ));
             }
 
             tracker.attempts++;
             if (tracker.attempts > 5) {
-                long penalty = Math.min((long) Math.pow(2, tracker.attempts - 5), 900);
-                tracker.lockoutTime = LocalDateTime.now().plusSeconds(penalty);
+                long penaltySeconds = Math.min((long) Math.pow(2, tracker.attempts - 5), 900);
+                tracker.lockoutTime = LocalDateTime.now().plusSeconds(penaltySeconds);
+
+                activityLogService.log(null, "AUTH", "AUTH_LOGIN_FAILED", username,
+                        "Brute-force throttle triggered for non-existent username '" + username + "'. Consecutive failures: " + tracker.attempts,
+                        "WARNING", request);
+
+                return ResponseEntity.status(429).body(Map.of(
+                        "error", "Too many failed attempts. Temporarily locked for security. Please try again in " + penaltySeconds + " second(s).",
+                        "retryAfterSeconds", penaltySeconds
+                ));
             }
 
             activityLogService.log(null, "AUTH", "AUTH_LOGIN_FAILED", username, "Failed login attempt for unknown username: '" + username + "'", "FAILED", request);
             return ResponseEntity.status(401).body(Map.of("error", "Invalid username or password."));
         }
 
-        // BRANCH B: USER EXISTS
+        // BRANCH B: USER EXISTS (Database-persisted progressive lockout)
         User user = userOpt.get();
         String formattedUserId = String.format("#USR-%04d", user.getId());
 
+        // Check if currently under progressive lockout penalty
         if (user.getLockoutUntil() != null && LocalDateTime.now().isBefore(user.getLockoutUntil())) {
-            activityLogService.log(null, "AUTH", "AUTH_ACCOUNT_LOCKED", formattedUserId, "Blocked login attempt for '" + username + "' during active progressive lockout penalty.", "WARNING", request);
-            return ResponseEntity.status(429).body(Map.of("error", "Too many failed attempts. Account temporarily rate-limited for security."));
+            long secondsLeft = Duration.between(LocalDateTime.now(), user.getLockoutUntil()).getSeconds() + 1;
+
+            activityLogService.log(null, "AUTH", "AUTH_ACCOUNT_LOCKED", formattedUserId,
+                    "Blocked login attempt for '" + username + "' during active progressive lockout penalty (" + secondsLeft + "s remaining).",
+                    "WARNING", request);
+
+            return ResponseEntity.status(429).body(Map.of(
+                    "error", "Too many failed attempts. Account temporarily locked for security. Please try again in " + secondsLeft + " second(s).",
+                    "retryAfterSeconds", secondsLeft
+            ));
         }
 
-        if (!user.getPassword().equals(password)) {
+        // 🔒 SMART PASSWORD VERIFICATION (BCrypt with legacy plaintext fallback)
+        boolean passwordMatches = false;
+        String storedPassword = user.getPassword();
+
+        if (storedPassword != null && (storedPassword.startsWith("$2a$") || storedPassword.startsWith("$2b$") || storedPassword.startsWith("$2y$"))) {
+            passwordMatches = passwordEncoder.matches(password, storedPassword);
+        } else {
+            if (storedPassword != null && storedPassword.equals(password)) {
+                passwordMatches = true;
+                user.setPassword(passwordEncoder.encode(password));
+                userRepository.save(user);
+            }
+        }
+
+        if (!passwordMatches) {
             int attempts = user.getFailedLoginAttempts() + 1;
             user.setFailedLoginAttempts(attempts);
 
+            long penaltySeconds = 0;
             if (attempts > 5) {
-                long penaltySeconds = (long) Math.pow(2, attempts - 5);
-                penaltySeconds = Math.min(penaltySeconds, 900);
+                penaltySeconds = (long) Math.pow(2, attempts - 5);
+                penaltySeconds = Math.min(penaltySeconds, 900); // 15-minute cap (900 seconds)
                 user.setLockoutUntil(LocalDateTime.now().plusSeconds(penaltySeconds));
 
+                // 🔔 Dispatch prioritized security alert to CPDO Administrator on attempt 6 and 15
                 if (attempts == 6 || attempts == 15) {
                     notificationService.sendNotification(
                             getAdminId(),
@@ -151,14 +204,19 @@ public class AuthController {
             }
 
             userRepository.save(user);
-            activityLogService.log(null, "AUTH", "AUTH_LOGIN_FAILED", formattedUserId, "Failed login attempt for '" + username + "'. Total consecutive failures: " + attempts, "FAILED", request);
+            activityLogService.log(null, "AUTH", "AUTH_LOGIN_FAILED", formattedUserId,
+                    "Failed login attempt for '" + username + "'. Total consecutive failures: " + attempts, "FAILED", request);
 
             if (attempts > 5) {
-                return ResponseEntity.status(429).body(Map.of("error", "Too many failed attempts. Account temporarily rate-limited for security."));
+                return ResponseEntity.status(429).body(Map.of(
+                        "error", "Too many failed attempts. Account temporarily locked for security. Please try again in " + penaltySeconds + " second(s).",
+                        "retryAfterSeconds", penaltySeconds
+                ));
             }
             return ResponseEntity.status(401).body(Map.of("error", "Invalid username or password."));
         }
 
+        // ✅ SUCCESSFUL AUTHENTICATION: Reset failure counters & clear lockout
         user.setFailedLoginAttempts(0);
         user.setLockoutUntil(null);
         userRepository.save(user);
@@ -172,11 +230,13 @@ public class AuthController {
             }
         }
 
+        // Account Status Check (Suspended)
         if ("Suspended".equalsIgnoreCase(user.getStatus())) {
             activityLogService.log(user, "AUTH", "AUTH_SUSPENDED_BLOCKED", formattedUserId, "Suspended account attempted login.", "FAILED", request);
             return ResponseEntity.status(403).body(Map.of("error", "Your account is currently Suspended. Please contact the CPDO."));
         }
 
+        // Account Status Check (Deactivated)
         if ("Deactivated".equalsIgnoreCase(user.getStatus())) {
             activityLogService.log(user, "AUTH", "AUTH_DEACTIVATED_BLOCKED", formattedUserId, "Deactivated account attempted login.", "FAILED", request);
             return ResponseEntity.status(403).body(Map.of("error", "Your account has been Deactivated. Access revoked."));
@@ -186,6 +246,7 @@ public class AuthController {
             return ResponseEntity.status(403).body(Map.of("error", "No official email is linked to this account. Cannot proceed with MFA. Contact Admin."));
         }
 
+        // ⏱️ WORKFLOW 1: 5-Minute Window for Active Login MFA
         String otp = String.format("%06d", new Random().nextInt(999999));
         mfaTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(5)));
 
@@ -217,7 +278,7 @@ public class AuthController {
     }
 
     // ==========================================
-    // 4. VERIFY OTP & GRANT ACCESS
+    // 4. VERIFY OTP & GRANT ACCESS (5-MIN TTL & 3-ATTEMPT CAP)
     // ==========================================
     @PostMapping("/verify-mfa")
     public ResponseEntity<?> verifyMfa(@RequestBody Map<String, Object> payload, HttpServletRequest request) {
@@ -232,15 +293,31 @@ public class AuthController {
 
         if (LocalDateTime.now().isAfter(session.expiryTime)) {
             mfaTracker.remove(userId);
-            return ResponseEntity.status(400).body(Map.of("error", "Verification code expired. Please go back and log in again."));
+            return ResponseEntity.status(400).body(Map.of("error", "Verification code expired (5-minute limit exceeded). Please log in again."));
         }
 
+        // 🛡️ CONTROL A3: Strict 3-Attempt Lockout
         if (!session.otp.equals(submittedOtp)) {
+            session.failedAttempts++;
             User attemptedUser = userRepository.findById(userId).orElse(null);
-            activityLogService.log(attemptedUser, "AUTH", "AUTH_MFA_FAILED", String.format("#USR-%04d", userId), "Invalid MFA verification code entered.", "FAILED", request);
-            return ResponseEntity.status(401).body(Map.of("error", "Invalid verification code. Please try again."));
+            String formattedId = String.format("#USR-%04d", userId);
+
+            if (session.failedAttempts >= 3) {
+                mfaTracker.remove(userId); // Burn token immediately
+                activityLogService.log(attemptedUser, "SECURITY", "MFA_ATTEMPTS_EXCEEDED", formattedId,
+                        "MFA code invalidated after 3 consecutive failed attempts.", "WARNING", request);
+
+                return ResponseEntity.status(429).body(Map.of("error", "Maximum verification attempts exceeded. Verification code invalidated for security. Please log in again."));
+            }
+
+            int remaining = 3 - session.failedAttempts;
+            activityLogService.log(attemptedUser, "AUTH", "AUTH_MFA_FAILED", formattedId,
+                    "Invalid MFA verification code entered. " + remaining + " attempt(s) remaining.", "FAILED", request);
+
+            return ResponseEntity.status(401).body(Map.of("error", "Invalid verification code. " + remaining + " attempt(s) remaining."));
         }
 
+        // 🛡️ ATOMIC SINGLE-USE INVALIDATION: Burn token immediately upon successful verification
         mfaTracker.remove(userId);
 
         Optional<User> userOpt = userRepository.findById(userId);
@@ -249,10 +326,10 @@ public class AuthController {
         }
         User user = userOpt.get();
 
-        // 🕒 Initialize active server-side session clock
         activeSessionTracker.put(user.getId(), new ActiveSession(LocalDateTime.now(), LocalDateTime.now()));
 
-        activityLogService.log(user, "AUTH", "AUTH_LOGIN_SUCCESS", String.format("#USR-%04d", user.getId()), "User successfully verified MFA and established active session for " + user.getRole() + " role.", "SUCCESS", request);
+        activityLogService.log(user, "AUTH", "AUTH_LOGIN_SUCCESS", String.format("#USR-%04d", user.getId()),
+                "User successfully verified MFA and established active session for " + user.getRole() + " role.", "SUCCESS", request);
 
         Map<String, Object> responseData = new HashMap<>();
         responseData.put("userId", user.getId());
@@ -279,7 +356,7 @@ public class AuthController {
     }
 
     // ==========================================
-    // 5. FORGOT PASSWORD REQUEST OTP
+    // 5. FORGOT PASSWORD REQUEST OTP (10-MINUTE EXPIRY)
     // ==========================================
     @PostMapping("/forgot-password/request")
     public ResponseEntity<?> requestPasswordReset(@RequestBody Map<String, String> payload, HttpServletRequest request) {
@@ -293,6 +370,7 @@ public class AuthController {
         User user = userOpt.get();
         String formattedUserId = String.format("#USR-%04d", user.getId());
 
+        // ⏱️ WORKFLOW 2: 10-Minute Window for Emergency Password Recovery
         String otp = String.format("%06d", new Random().nextInt(999999));
         resetTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(10)));
 
@@ -326,13 +404,18 @@ public class AuthController {
     }
 
     // ==========================================
-    // 6. FORGOT PASSWORD VERIFY & RESET
+    // 6. FORGOT PASSWORD VERIFY & RESET (10-MIN TTL & 3-ATTEMPT CAP)
     // ==========================================
     @PostMapping("/forgot-password/reset")
     public ResponseEntity<?> resetPassword(@RequestBody Map<String, Object> payload, HttpServletRequest request) {
         Long userId = Long.valueOf(payload.get("userId").toString());
         String submittedOtp = payload.get("otp").toString();
         String newPassword = payload.get("newPassword").toString();
+
+        if (!isValidPassword(newPassword)) {
+            return ResponseEntity.status(400).body(Map.of("error",
+                    "Password does not meet complexity requirements. It must be at least 8 characters long and contain at least one uppercase letter, one digit, and one special character (@$!%*?&#)."));
+        }
 
         MfaSession session = resetTracker.get(userId);
 
@@ -342,13 +425,28 @@ public class AuthController {
 
         if (LocalDateTime.now().isAfter(session.expiryTime)) {
             resetTracker.remove(userId);
-            return ResponseEntity.status(400).body(Map.of("error", "Reset code has expired. Please request a new one."));
+            return ResponseEntity.status(400).body(Map.of("error", "Reset code has expired (10-minute limit exceeded). Please request a new one."));
         }
 
+        // 🛡️ CONTROL A3: Strict 3-Attempt Lockout on Recovery Code
         if (!session.otp.equals(submittedOtp)) {
+            session.failedAttempts++;
             User attemptedUser = userRepository.findById(userId).orElse(null);
-            activityLogService.log(attemptedUser, "AUTH", "AUTH_PASSWORD_RESET_FAILED", String.format("#USR-%04d", userId), "Invalid password reset recovery OTP submitted.", "FAILED", request);
-            return ResponseEntity.status(401).body(Map.of("error", "Invalid recovery code. Please try again."));
+            String formattedId = String.format("#USR-%04d", userId);
+
+            if (session.failedAttempts >= 3) {
+                resetTracker.remove(userId); // Burn OTP immediately
+                activityLogService.log(attemptedUser, "SECURITY", "RESET_OTP_EXCEEDED", formattedId,
+                        "Password reset code invalidated after 3 failed attempts.", "WARNING", request);
+
+                return ResponseEntity.status(429).body(Map.of("error", "Maximum verification attempts exceeded. Reset code invalidated for security. Please request a new code."));
+            }
+
+            int remaining = 3 - session.failedAttempts;
+            activityLogService.log(attemptedUser, "AUTH", "AUTH_PASSWORD_RESET_FAILED", formattedId,
+                    "Invalid password reset recovery OTP submitted. " + remaining + " attempt(s) remaining.", "FAILED", request);
+
+            return ResponseEntity.status(401).body(Map.of("error", "Invalid recovery code. " + remaining + " attempt(s) remaining."));
         }
 
         Optional<User> userOpt = userRepository.findById(userId);
@@ -357,15 +455,17 @@ public class AuthController {
         }
 
         User user = userOpt.get();
-        user.setPassword(newPassword);
-
+        user.setPassword(passwordEncoder.encode(newPassword));
         user.setFailedLoginAttempts(0);
         user.setLockoutUntil(null);
 
         userRepository.save(user);
+
+        // 🛡️ ATOMIC SINGLE-USE INVALIDATION: Burn recovery token immediately upon password update
         resetTracker.remove(userId);
 
-        activityLogService.log(user, "AUTH", "AUTH_PASSWORD_RESET_SUCCESS", String.format("#USR-%04d", user.getId()), "Password credentials successfully updated via recovery verification.", "SUCCESS", request);
+        activityLogService.log(user, "AUTH", "AUTH_PASSWORD_RESET_SUCCESS", String.format("#USR-%04d", user.getId()),
+                "Password credentials successfully updated via recovery verification.", "SUCCESS", request);
 
         return ResponseEntity.ok(Map.of("message", "Password successfully reset! You can now log in."));
     }
@@ -415,29 +515,24 @@ public class AuthController {
             return ResponseEntity.status(403).body(Map.of("valid", false, "error", "Role mismatch detected."));
         }
 
-        // 🕒 TIMEOUT AUDIT: 15-Min Inactivity & 8-Hour Absolute Shift Ceiling
         LocalDateTime now = LocalDateTime.now();
         ActiveSession session = activeSessionTracker.get(userId);
 
         if (session != null) {
-            // Absolute check: 8 Hours
             if (Duration.between(session.loginTime, now).toHours() >= 8) {
                 activeSessionTracker.remove(userId);
                 activityLogService.log(user, "AUTH", "AUTH_SESSION_EXPIRED", String.format("#USR-%04d", user.getId()), "Session expired: Reached 8-hour maximum shift limit.", "INFO", request);
                 return ResponseEntity.status(401).body(Map.of("valid", false, "error", "EXPIRED_ABSOLUTE", "message", "Your 8-hour shift session has ended. Please log in again."));
             }
 
-            // Inactivity check: 15 Minutes
             if (Duration.between(session.lastActiveTime, now).toMinutes() >= 15) {
                 activeSessionTracker.remove(userId);
                 activityLogService.log(user, "AUTH", "AUTH_SESSION_TIMEOUT", String.format("#USR-%04d", user.getId()), "Session expired: Inactive for 15 minutes.", "INFO", request);
                 return ResponseEntity.status(401).body(Map.of("valid", false, "error", "EXPIRED_IDLE", "message", "Session timed out due to 15 minutes of inactivity."));
             }
 
-            // Active request received: advance sliding idle clock
             session.lastActiveTime = now;
         } else {
-            // Cold restart recovery: initialize clock
             activeSessionTracker.put(userId, new ActiveSession(now, now));
         }
 

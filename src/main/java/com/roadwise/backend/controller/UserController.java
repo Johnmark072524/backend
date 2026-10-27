@@ -263,37 +263,67 @@ public class UserController {
     }
 
     // ==========================================
-    // 5. PROVISION NEW BARANGAY OFFICIAL ACCOUNT
-    // ==========================================
+// 5. PROVISION NEW BARANGAY OFFICIAL ACCOUNT (CPDO ADMIN ONLY)
+// ==========================================
     @PostMapping("/register")
     public ResponseEntity<?> registerOfficial(
             @RequestBody Map<String, String> payload,
             HttpServletRequest request) {
 
+        // 🛡️ CONTROL 8 PRIVILEGED ACTION GUARD: Verify Caller is Authenticated CPDO Admin
+        String adminIdStr = payload.get("adminId");
+        if (adminIdStr == null || adminIdStr.trim().isEmpty()) {
+            return ResponseEntity.status(403).body(Map.of("error",
+                    "Access Denied: Administrative authorization is required to provision municipal accounts."));
+        }
+
+        Long adminId;
+        try {
+            adminId = Long.valueOf(adminIdStr.trim());
+        } catch (NumberFormatException e) {
+            return ResponseEntity.status(403).body(Map.of("error",
+                    "Access Denied: Invalid administrator identity format."));
+        }
+
+        Optional<User> adminOpt = userRepository.findById(adminId);
+        if (adminOpt.isEmpty() || adminOpt.get().getRole() == null ||
+                (!adminOpt.get().getRole().equalsIgnoreCase("CPDO Admin") && !adminOpt.get().getRole().equalsIgnoreCase("Admin"))) {
+            return ResponseEntity.status(403).body(Map.of("error",
+                    "Access Denied: Only CPDO Administrators are authorized to provision official accounts."));
+        }
+
+        User adminActor = adminOpt.get();
+
+        // 🛡️ CONTROL 2 ENFORCEMENT: Reject weak provisioning passwords
+        String rawPassword = payload.get("password");
+        if (!isValidPassword(rawPassword)) {
+            return ResponseEntity.status(400).body(Map.of("error",
+                    "Password does not meet complexity requirements. It must be at least 8 characters long and contain at least one uppercase letter, one digit, and one special character (@$!%*?&#)."));
+        }
+
+        // 🛡️ UNIQUE IDENTITY CHECKS
         String username = payload.get("username");
         if (userRepository.findByUsername(username).isPresent()) {
             return ResponseEntity.status(400).body(Map.of("error", "Username already exists!"));
         }
 
-        String rawPassword = payload.get("password");
-
-        // 🛡️ CONTROL 2 ENFORCEMENT: Reject weak provisioning passwords
-        if (!isValidPassword(rawPassword)) {
-            return ResponseEntity.status(400).body(Map.of("error",
-                    "Password does not meet complexity requirements. It must be at least 8 characters long and contain at least one uppercase letter, one digit, and one special character (@$!%*?&#)."));
+        String email = payload.get("email");
+        if (email != null && !email.trim().isEmpty() && userRepository.findByEmail(email).isPresent()) {
+            return ResponseEntity.status(400).body(Map.of("error", "Email is already registered to another user!"));
         }
 
         User newUser = new User();
         newUser.setFirstName(payload.get("firstName"));
         newUser.setMiddleName(payload.get("middleName"));
         newUser.setLastName(payload.get("lastName"));
-        newUser.setEmail(payload.get("email"));
+        newUser.setEmail(email);
         newUser.setUsername(username);
-        // 🔒 Store salted BCrypt hash in DB
+        // 🔒 Store salted BCrypt hash in DB (Control 1)
         newUser.setPassword(passwordEncoder.encode(rawPassword));
-        newUser.setRole(payload.get("role"));
+        newUser.setRole(payload.get("role") != null && !payload.get("role").trim().isEmpty() ? payload.get("role") : "BARANGAY");
         newUser.setStatus("Active");
 
+        // 🛡️ CONTROL 8 MUNICIPAL GOVERNANCE: Strictly 1 Active Official per Barangay
         if (payload.get("barangayId") != null && !payload.get("barangayId").isEmpty()) {
             Long brgyId = Long.parseLong(payload.get("barangayId"));
             List<User> existingOfficials = userRepository.findByBarangayId(brgyId);
@@ -334,17 +364,14 @@ public class UserController {
             emailService.sendEmail(savedUser.getEmail(), subject, emailBody);
         }
 
-        String adminIdStr = payload.get("adminId");
-        Long adminId = (adminIdStr != null && !adminIdStr.isEmpty()) ? Long.valueOf(adminIdStr) : getAdminId();
-        User adminActor = userRepository.findById(adminId).orElse(null);
-
         String brgyName = savedUser.getBarangay() != null ? savedUser.getBarangay().getBarangayName() : "City Central";
         activityLogService.log(
                 adminActor,
                 "USER",
                 "USER_PROVISIONED",
                 "#USR-" + savedUser.getId(),
-                "Provisioned new " + savedUser.getRole() + " account for " + savedUser.getFirstName() + " " + savedUser.getLastName() + " (Assigned: " + brgyName + ").",
+                "CPDO Admin " + adminActor.getFirstName() + " " + adminActor.getLastName() +
+                        " provisioned new " + savedUser.getRole() + " account for " + savedUser.getFirstName() + " " + savedUser.getLastName() + " (Assigned: " + brgyName + ").",
                 "SUCCESS",
                 request
         );

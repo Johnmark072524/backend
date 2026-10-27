@@ -74,6 +74,63 @@ public class RoadReportController {
     private ReportStatusLogService reportStatusLogService;
 
     // ==========================================
+    // 🛡️ CONTROL 6: SERVER-SIDE RBAC ROLE CHECKERS
+    // ==========================================
+    private User resolveUser(Long userId) {
+        if (userId == null) return null;
+        return userRepository.findById(userId).orElse(null);
+    }
+
+    private boolean isCpdoAdmin(User user) {
+        if (user == null || user.getRole() == null) return false;
+        String r = user.getRole().trim();
+        return r.equalsIgnoreCase("CPDO Admin") || r.equalsIgnoreCase("Admin");
+    }
+
+    private boolean isCityEngineer(User user) {
+        if (user == null || user.getRole() == null) return false;
+        String r = user.getRole().trim();
+        return r.equalsIgnoreCase("ENGINEER") || r.equalsIgnoreCase("City Engineer");
+    }
+
+    private boolean isBarangayOfficial(User user) {
+        if (user == null || user.getRole() == null) return false;
+        String r = user.getRole().trim();
+        return r.equalsIgnoreCase("BARANGAY") || r.equalsIgnoreCase("Barangay Official");
+    }
+
+    // ==========================================
+    // 🛡️ CONTROL 7: TERRITORIAL JURISDICTION CHECKER
+    // ==========================================
+    private String validateRoadTerritory(String roadId, Long targetBarangayId, User callingUser) {
+        if (callingUser == null) return "User identity required.";
+
+        // If the actor is a Barangay Official, enforce their account's assigned barangay
+        if (isBarangayOfficial(callingUser)) {
+            if (callingUser.getBarangay() == null || !callingUser.getBarangay().getId().equals(targetBarangayId)) {
+                return "Security Violation: You are not authorized to submit reports outside your assigned barangay jurisdiction.";
+            }
+        }
+
+        // Validate that the physical road belongs to targetBarangayId
+        if (roadId != null && !roadId.trim().isEmpty()) {
+            String cleanId = roadId.replace(" ", "").trim();
+            Optional<CityRoad> matchedRoad = cityRoadRepository.findAll().stream()
+                    .filter(cr -> cr.getRoadId() != null && cr.getRoadId().replace(" ", "").trim().equalsIgnoreCase(cleanId))
+                    .findFirst();
+
+            if (matchedRoad.isPresent()) {
+                CityRoad road = matchedRoad.get();
+                if (road.getBarangay() != null && !road.getBarangay().getId().equals(targetBarangayId)) {
+                    return "Security Violation: Road '" + road.getRoadName() + "' belongs to " +
+                            road.getBarangay().getBarangayName() + ", not your selected barangay.";
+                }
+            }
+        }
+        return null; // Valid
+    }
+
+    // ==========================================
     // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
     // ==========================================
     private Long getAdminId() {
@@ -94,20 +151,6 @@ public class RoadReportController {
                 .map(User::getId)
                 .findFirst()
                 .orElse(null);
-    }
-
-    // ==========================================
-    // 🚀 HELPER: HYBRID ACTOR RESOLVER
-    // ==========================================
-    private User resolveActor(Long explicitUserId, Long fallbackRoleId) {
-        if (explicitUserId != null) {
-            Optional<User> u = userRepository.findById(explicitUserId);
-            if (u.isPresent()) return u.get();
-        }
-        if (fallbackRoleId != null) {
-            return userRepository.findById(fallbackRoleId).orElse(null);
-        }
-        return null;
     }
 
     // ==========================================
@@ -190,7 +233,7 @@ public class RoadReportController {
         if (!contentType.equals("image/jpeg") && !contentType.equals("image/png") && !contentType.equals("image/webp") && !contentType.equals("image/jpg")) {
             return "Invalid file format for '" + file.getOriginalFilename() + "'! Please upload JPG, PNG, or WebP.";
         }
-        if (file.getSize() > (5 * 1024 * 1024)) {
+        if (file.getSize() > (5L * 1024 * 1024)) {
             return "Image '" + file.getOriginalFilename() + "' exceeds the 5MB size limit!";
         }
         return null;
@@ -215,9 +258,26 @@ public class RoadReportController {
             HttpServletRequest request) {
 
         try {
-            String severity = "None";
-            String status = "UNDAMAGED";
-            double confidence = 0.0;
+            // 🛡️ CONTROL 6 RBAC: Ensure caller has valid user credentials
+            User callingUser = resolveUser(userId);
+            if (callingUser == null) {
+                return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Valid user identity is required to submit road reports."));
+            }
+
+            // 🛡️ CONTROL 7 SCOPING CHECK: Prevent cross-barangay record pollution
+            if (barangayId != null) {
+                String territoryError = validateRoadTerritory(report.getCityRoadId(), barangayId, callingUser);
+                if (territoryError != null) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "TERRITORIAL_MISMATCH",
+                            "message", territoryError
+                    ));
+                }
+            }
+
+            String severity;
+            String status;
+            double confidence;
 
             if (report.getDamageType() == null || report.getDamageType().trim().isEmpty()) {
                 report.setDamageType("Pending Inspection");
@@ -246,7 +306,6 @@ public class RoadReportController {
             }
 
             if (hasBatchPhotos || hasLegacyPhoto) {
-                // Validate individual files
                 MultipartFile[] filesToValidate = hasBatchPhotos
                         ? new MultipartFile[]{imageWhole, imageTop, imageLeft, imageRight, imageClose}
                         : new MultipartFile[]{imageFile};
@@ -312,8 +371,6 @@ public class RoadReportController {
                     report.setDamageImageLeft(urlLeft);
                     report.setDamageImageRight(urlRight);
                     report.setDamageImageClose(urlClose);
-
-                    // Primary thumbnail defaults to Whole Road View
                     report.setDamageImage(urlWhole);
                 } else {
                     String cloudImageUrl = supabaseStorageService.uploadImage(imageFile);
@@ -331,7 +388,6 @@ public class RoadReportController {
 
                 System.out.println(">>> [AI SUCCESS] Evaluated multi-angle submission as " + severity + " (" + confidence + "%)");
             } else {
-                // No photo attached (Road surveyed in good condition / No physical distress)
                 report.setDamageImage(null);
                 report.setDamageImageWhole(null);
                 report.setDamageImageTop(null);
@@ -344,20 +400,13 @@ public class RoadReportController {
                 report.setDamageType("None");
             }
 
-            User foundUser = null;
             if (barangayId != null) {
                 Barangay foundBarangay = barangayRepository.findById(barangayId).orElse(null);
                 report.setBarangay(foundBarangay);
             }
 
-            if (userId != null) {
-                foundUser = userRepository.findById(userId).orElse(null);
-                report.setUser(foundUser);
-                if (foundUser != null) {
-                    report.setReportedBy(foundUser.getFirstName() + " " + foundUser.getLastName());
-                }
-            }
-
+            report.setUser(callingUser);
+            report.setReportedBy(callingUser.getFirstName() + " " + callingUser.getLastName());
             report.setStatus("Pending Validation");
 
             // 💾 COMMIT TO DATABASE
@@ -370,7 +419,7 @@ public class RoadReportController {
                     null,
                     "Pending Validation",
                     "Road damage report submitted for '" + savedReport.getCityRoadName() + "'.",
-                    foundUser,
+                    callingUser,
                     savedReport.getReportedBy(),
                     "Barangay Official",
                     savedReport.getDamageImage()
@@ -405,7 +454,7 @@ public class RoadReportController {
 
             // ⏱️ AUDIT LOG
             activityLogService.log(
-                    foundUser,
+                    callingUser,
                     "PROJECT",
                     "REPORT_SUBMITTED",
                     "#PRJ-" + String.format("%04d", savedReport.getId()),
@@ -451,265 +500,283 @@ public class RoadReportController {
             @RequestBody Map<String, Object> payload,
             HttpServletRequest request) {
 
-        return repository.findById(id).map(report -> {
-            String previousStatus = report.getStatus();
-            String newStatus = payload.get("status") != null ? payload.get("status").toString() : null;
-            String adminRemarks = payload.get("adminRemarks") != null ? payload.get("adminRemarks").toString() : null;
-            String passedUserIdStr = payload.get("userId") != null ? payload.get("userId").toString() : null;
-            Long explicitUserId = passedUserIdStr != null ? Long.valueOf(passedUserIdStr) : null;
+        String passedUserIdStr = payload.get("userId") != null ? payload.get("userId").toString() : null;
+        Long explicitUserId = passedUserIdStr != null ? Long.valueOf(passedUserIdStr) : null;
+        User callingUser = resolveUser(explicitUserId);
 
-            // 🎯 CAPTURE TARGET COMPLETION DATE
-            Object targetDateObj = payload.get("targetCompletionDate");
-            if (targetDateObj != null && !targetDateObj.toString().trim().isEmpty()) {
-                try {
-                    report.setTargetCompletionDate(LocalDate.parse(targetDateObj.toString().trim()));
-                } catch (Exception e) {
-                    System.err.println("Failed to parse target completion date: " + targetDateObj);
+        // 🛡️ CONTROL 6 RBAC: Verify authenticated caller identity
+        if (callingUser == null) {
+            return ResponseEntity.status(403).body("Access Denied: Missing or invalid user identity.");
+        }
+
+        String newStatus = payload.get("status") != null ? payload.get("status").toString() : null;
+        String adminRemarks = payload.get("adminRemarks") != null ? payload.get("adminRemarks").toString() : null;
+
+        // 🛡️ CONTROL 6 RBAC: Separation of Office Duties Check
+        boolean isCeoStartRepair = newStatus != null && newStatus.equalsIgnoreCase("In Progress") &&
+                (adminRemarks == null || adminRemarks.trim().isEmpty());
+
+        if (isCeoStartRepair) {
+            if (!isCityEngineer(callingUser) && !isCpdoAdmin(callingUser)) {
+                return ResponseEntity.status(403).body("Access Denied: Only the City Engineering Office (CEO) can deploy crews and mark repairs as In Progress.");
+            }
+        } else {
+            if (!isCpdoAdmin(callingUser)) {
+                return ResponseEntity.status(403).body("Access Denied: Only CPDO Administrators are authorized to validate, reject, or officially close reports.");
+            }
+        }
+
+        Optional<RoadReport> reportOpt = repository.findById(id);
+        if (reportOpt.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        RoadReport report = reportOpt.get();
+        String previousStatus = report.getStatus();
+
+        // 🎯 CAPTURE TARGET COMPLETION DATE
+        Object targetDateObj = payload.get("targetCompletionDate");
+        if (targetDateObj != null && !targetDateObj.toString().trim().isEmpty()) {
+            try {
+                report.setTargetCompletionDate(LocalDate.parse(targetDateObj.toString().trim()));
+            } catch (Exception e) {
+                System.err.println("Failed to parse target completion date: " + targetDateObj);
+            }
+        }
+
+        // 📐 CAPTURE CPDO TECHNICAL DAMAGE ASSESSMENT
+        if (payload.get("damageType") != null) {
+            report.setDamageType(payload.get("damageType").toString());
+        }
+        if (payload.get("damageLength") != null) {
+            try { report.setDamageLength(Double.valueOf(payload.get("damageLength").toString())); } catch (Exception ignored) {}
+        }
+        if (payload.get("damageWidth") != null) {
+            try { report.setDamageWidth(Double.valueOf(payload.get("damageWidth").toString())); } catch (Exception ignored) {}
+        }
+        if (payload.get("damageDepth") != null) {
+            try { report.setDamageDepth(Double.valueOf(payload.get("damageDepth").toString())); } catch (Exception ignored) {}
+        }
+
+        // 🛣️ CAPTURE ROAD DIMENSIONS & SYNC WITH MASTER INVENTORY
+        Double updatedWidth = null;
+        if (payload.get("width") != null) {
+            try {
+                updatedWidth = Double.valueOf(payload.get("width").toString());
+                report.setWidth(updatedWidth);
+            } catch (Exception ignored) {}
+        }
+        if (payload.get("length") != null) {
+            try { report.setLength(Double.valueOf(payload.get("length").toString())); } catch (Exception ignored) {}
+        }
+        if (payload.get("lengthOfCulverts") != null) {
+            try { report.setLengthOfCulverts(Double.valueOf(payload.get("lengthOfCulverts").toString())); } catch (Exception ignored) {}
+        }
+        if (payload.get("numberOfBridges") != null) {
+            try { report.setNumberOfBridges(Integer.valueOf(payload.get("numberOfBridges").toString())); } catch (Exception ignored) {}
+        }
+
+        if (updatedWidth != null && updatedWidth > 0 && report.getCityRoadId() != null) {
+            String cleanTargetRoadId = report.getCityRoadId().replace(" ", "").trim();
+            List<CityRoad> matchedRoads = cityRoadRepository.findAll().stream()
+                    .filter(cr -> cr.getRoadId() != null && cr.getRoadId().replace(" ", "").trim().equalsIgnoreCase(cleanTargetRoadId))
+                    .toList();
+
+            for (CityRoad cr : matchedRoads) {
+                cr.setRoadWidth(updatedWidth);
+                if (report.getLength() != null && report.getLength() > 0) cr.setRoadLength(report.getLength());
+                if (report.getLengthOfCulverts() != null) cr.setLengthOfCulverts(report.getLengthOfCulverts());
+                if (report.getNumberOfBridges() != null) cr.setNumberOfBridges(report.getNumberOfBridges());
+            }
+            if (!matchedRoads.isEmpty()) {
+                cityRoadRepository.saveAll(matchedRoads);
+                System.out.println(">>> [SYNC SUCCESS] Master CityRoad record '" + report.getCityRoadId() + "' updated with Road Width: " + updatedWidth + "m");
+            }
+        }
+
+        // 📐 RECALCULATE OFFICIAL ENGINEERING SEVERITY
+        if (newStatus != null && newStatus.equalsIgnoreCase("Validated")) {
+            String calculatedSeverity = calculateEngineeringSeverity(
+                    report.getDamageType(),
+                    report.getDamageLength(),
+                    report.getDamageWidth(),
+                    report.getDamageDepth(),
+                    report.getRoadImportance()
+            );
+            report.setSeverity(calculatedSeverity);
+            System.out.println(">>> [SEVERITY RECALCULATED] Report #RPT-" + report.getId() +
+                    " updated to Engineering Severity: " + calculatedSeverity +
+                    " (Original AI triage: " + report.getAiSeverity() + ")");
+        }
+
+        // 🛡️ AUTO-ARCHIVE REPORTS WITHOUT DAMAGE EVIDENCE
+        boolean isAutoArchivedNoDamage = false;
+        if (newStatus != null && newStatus.equalsIgnoreCase("Validated")) {
+            boolean hasNoDamageImage = report.getDamageImage() == null ||
+                    report.getDamageImage().trim().isEmpty() ||
+                    report.getDamageImage().trim().equalsIgnoreCase("no_image.jpg");
+
+            boolean isMarkedNone = "None".equalsIgnoreCase(report.getDamageType());
+
+            if (hasNoDamageImage && isMarkedNone) {
+                newStatus = "Archived";
+                isAutoArchivedNoDamage = true;
+                if (adminRemarks == null || adminRemarks.trim().isEmpty()) {
+                    adminRemarks = "Inspected by CPDO: Road surveyed in passable/good condition. Ticket archived as 'No Action Required'.";
                 }
             }
+        }
 
-            // 📐 CAPTURE CPDO TECHNICAL DAMAGE ASSESSMENT
-            if (payload.get("damageType") != null) {
-                report.setDamageType(payload.get("damageType").toString());
-            }
-            if (payload.get("damageLength") != null) {
-                try { report.setDamageLength(Double.valueOf(payload.get("damageLength").toString())); } catch (Exception ignored) {}
-            }
-            if (payload.get("damageWidth") != null) {
-                try { report.setDamageWidth(Double.valueOf(payload.get("damageWidth").toString())); } catch (Exception ignored) {}
-            }
-            if (payload.get("damageDepth") != null) {
-                try { report.setDamageDepth(Double.valueOf(payload.get("damageDepth").toString())); } catch (Exception ignored) {}
-            }
+        // 🛡️ IDEMPOTENCY GUARD
+        if (newStatus != null && newStatus.equalsIgnoreCase(previousStatus)) {
+            return ResponseEntity.ok("ALREADY_UPDATED");
+        }
 
-            // 🛣️ CAPTURE ROAD DIMENSIONS & SYNC WITH MASTER INVENTORY
-            Double updatedWidth = null;
-            if (payload.get("width") != null) {
-                try {
-                    updatedWidth = Double.valueOf(payload.get("width").toString());
-                    report.setWidth(updatedWidth);
-                } catch (Exception ignored) {}
-            }
-            if (payload.get("length") != null) {
-                try { report.setLength(Double.valueOf(payload.get("length").toString())); } catch (Exception ignored) {}
-            }
-            if (payload.get("lengthOfCulverts") != null) {
-                try { report.setLengthOfCulverts(Double.valueOf(payload.get("lengthOfCulverts").toString())); } catch (Exception ignored) {}
-            }
-            if (payload.get("numberOfBridges") != null) {
-                try { report.setNumberOfBridges(Integer.valueOf(payload.get("numberOfBridges").toString())); } catch (Exception ignored) {}
-            }
+        if (newStatus != null) {
+            report.setStatus(newStatus);
 
-            if (updatedWidth != null && updatedWidth > 0 && report.getCityRoadId() != null) {
-                String cleanTargetRoadId = report.getCityRoadId().replace(" ", "").trim();
-                List<CityRoad> matchedRoads = cityRoadRepository.findAll().stream()
-                        .filter(cr -> cr.getRoadId() != null && cr.getRoadId().replace(" ", "").trim().equalsIgnoreCase(cleanTargetRoadId))
-                        .toList();
-
-                for (CityRoad cr : matchedRoads) {
-                    cr.setRoadWidth(updatedWidth);
-                    if (report.getLength() != null && report.getLength() > 0) cr.setRoadLength(report.getLength());
-                    if (report.getLengthOfCulverts() != null) cr.setLengthOfCulverts(report.getLengthOfCulverts());
-                    if (report.getNumberOfBridges() != null) cr.setNumberOfBridges(report.getNumberOfBridges());
-                }
-                if (!matchedRoads.isEmpty()) {
-                    cityRoadRepository.saveAll(matchedRoads);
-                    System.out.println(">>> [SYNC SUCCESS] Master CityRoad record '" + report.getCityRoadId() + "' updated with Road Width: " + updatedWidth + "m");
-                }
+            if (newStatus.equalsIgnoreCase("Closed") ||
+                    newStatus.equalsIgnoreCase("Resolved") ||
+                    newStatus.equalsIgnoreCase("Archived") ||
+                    newStatus.equalsIgnoreCase("Completed")) {
+                LocalDateTime nowPst = LocalDateTime.now(ZoneId.of("Asia/Manila"));
+                report.setDateArchived(nowPst);
+                report.setActualCompletionDate(nowPst);
             }
+        }
 
-            // 📐 RECALCULATE OFFICIAL ENGINEERING SEVERITY
-            if (newStatus != null && newStatus.equalsIgnoreCase("Validated")) {
-                String calculatedSeverity = calculateEngineeringSeverity(
-                        report.getDamageType(),
-                        report.getDamageLength(),
-                        report.getDamageWidth(),
-                        report.getDamageDepth(),
-                        report.getRoadImportance()
+        if (adminRemarks != null) {
+            report.setAdminRemarks(adminRemarks);
+        }
+
+        repository.save(report);
+
+        sendStatusUpdateEmail(report, newStatus, adminRemarks);
+
+        Long adminId = getAdminId();
+        Long ceoId = getCeoId();
+
+        if (newStatus != null) {
+            if (newStatus.equalsIgnoreCase("Completed") || (newStatus.equalsIgnoreCase("In Progress") && (adminRemarks == null || adminRemarks.trim().isEmpty()))) {
+                notificationService.sendNotification(
+                        adminId,
+                        "Report Status Update",
+                        "Report ID PRJ-" + report.getId() + " status has been updated to: " + newStatus,
+                        "REPORT"
                 );
-                report.setSeverity(calculatedSeverity);
-                System.out.println(">>> [SEVERITY RECALCULATED] Report #RPT-" + report.getId() +
-                        " updated to Engineering Severity: " + calculatedSeverity +
-                        " (Original AI triage: " + report.getAiSeverity() + ")");
             }
 
-            // 🛡️ AUTO-ARCHIVE REPORTS WITHOUT DAMAGE EVIDENCE
-            boolean isAutoArchivedNoDamage = false;
-            if (newStatus != null && newStatus.equalsIgnoreCase("Validated")) {
-                boolean hasNoDamageImage = report.getDamageImage() == null ||
-                        report.getDamageImage().trim().isEmpty() ||
-                        report.getDamageImage().trim().equalsIgnoreCase("no_image.jpg");
-
-                boolean isMarkedNone = "None".equalsIgnoreCase(report.getDamageType());
-
-                if (hasNoDamageImage && isMarkedNone) {
-                    newStatus = "Archived";
-                    isAutoArchivedNoDamage = true;
-                    if (adminRemarks == null || adminRemarks.trim().isEmpty()) {
-                        adminRemarks = "Inspected by CPDO: Road surveyed in passable/good condition. Ticket archived as 'No Action Required'.";
-                    }
-                }
-            }
-
-            // 🛡️ IDEMPOTENCY GUARD
-            if (newStatus != null && newStatus.equalsIgnoreCase(previousStatus)) {
-                return ResponseEntity.ok("ALREADY_UPDATED");
-            }
-
-            if (newStatus != null) {
-                report.setStatus(newStatus);
-
-                if (newStatus.equalsIgnoreCase("Closed") ||
-                        newStatus.equalsIgnoreCase("Resolved") ||
-                        newStatus.equalsIgnoreCase("Archived") ||
-                        newStatus.equalsIgnoreCase("Completed")) {
-                    LocalDateTime nowPst = LocalDateTime.now(ZoneId.of("Asia/Manila"));
-                    report.setDateArchived(nowPst);
-                    report.setActualCompletionDate(nowPst);
-                }
-            }
-
-            if (adminRemarks != null) {
-                report.setAdminRemarks(adminRemarks);
-            }
-
-            repository.save(report);
-
-            sendStatusUpdateEmail(report, newStatus, adminRemarks);
-
-            Long adminId = getAdminId();
-            Long ceoId = getCeoId();
-
-            if (newStatus != null) {
-                if (newStatus.equalsIgnoreCase("Completed") || (newStatus.equalsIgnoreCase("In Progress") && (adminRemarks == null || adminRemarks.trim().isEmpty()))) {
+            if (newStatus.equalsIgnoreCase("In Progress") && adminRemarks != null && !adminRemarks.trim().isEmpty()) {
+                if (ceoId != null) {
                     notificationService.sendNotification(
-                            adminId,
-                            "Report Status Update",
-                            "Report ID PRJ-" + report.getId() + " status has been updated to: " + newStatus,
+                            ceoId,
+                            "Repair Rework Required",
+                            "The CPDO Admin has requested a rework for PRJ-" + report.getId() + ". Admin Remarks: " + adminRemarks,
                             "REPORT"
                     );
-                }
 
-                if (newStatus.equalsIgnoreCase("In Progress") && adminRemarks != null && !adminRemarks.trim().isEmpty()) {
-                    if (ceoId != null) {
-                        notificationService.sendNotification(
-                                ceoId,
-                                "Repair Rework Required",
-                                "The CPDO Admin has requested a rework for PRJ-" + report.getId() + ". Admin Remarks: " + adminRemarks,
-                                "REPORT"
-                        );
-
-                        final String reworkRemarks = adminRemarks;
-
-                        userRepository.findById(ceoId).ifPresent(ceo -> {
-                            if (ceo.getEmail() != null && !ceo.getEmail().isEmpty()) {
-                                String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
-                                String subject = "RoadWise Alert: Repair Rework Required for PRJ-" + report.getId();
-                                String body = "Hello " + ceo.getFirstName() + ",\n\n" +
-                                        "The CPDO Admin has reviewed the proof of repair for " + safeRoadName + " (PRJ-" + report.getId() + ") and has requested a rework.\n\n" +
-                                        "Admin Remarks: " + reworkRemarks + "\n\n" +
-                                        "The project has been returned to your active queue. Please deploy the crew to address the feedback and upload new proof once completed.\n\n" +
-                                        "Best regards,\nRoadWise SJDM System";
-                                emailService.sendEmail(ceo.getEmail(), subject, body);
-                            }
-                        });
-                    }
-                }
-
-                if (report.getUser() != null) {
-                    Long brgyUserId = report.getUser().getId();
-                    String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
-
-                    if (isAutoArchivedNoDamage) {
-                        notificationService.sendNotification(
-                                brgyUserId,
-                                "Report Inspected & Archived",
-                                "CPDO reviewed Report #PRJ-" + report.getId() + " for " + safeRoadName + ". Road confirmed in good condition; ticket has been archived.",
-                                "REPORT"
-                        );
-                    } else if (newStatus.equalsIgnoreCase("Validated")) {
-                        notificationService.sendNotification(brgyUserId, "Report Validated", "Good news! Report #PRJ-" + report.getId() + " for " + safeRoadName + " has been validated by the CPDO.", "REPORT");
-                    } else if (newStatus.equalsIgnoreCase("Rejected")) {
-                        String reason = (adminRemarks != null && !adminRemarks.isEmpty()) ? adminRemarks : "Review remarks for details.";
-                        notificationService.sendNotification(brgyUserId, "Report Rejected", "Report #PRJ-" + report.getId() + " requires corrections. Reason: " + reason, "REPORT");
-                    } else if (newStatus.equalsIgnoreCase("In Progress")) {
-                        notificationService.sendNotification(brgyUserId, "Repair In Progress", "The City Engineering Office (CEO) is actively working on " + safeRoadName + " (ID: PRJ-" + report.getId() + ").", "REPORT");
-                    } else if (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved") || newStatus.equalsIgnoreCase("Archived")) {
-                        notificationService.sendNotification(brgyUserId, "Project Officially Closed", "Success! The repair for #PRJ-" + report.getId() + " on " + safeRoadName + " has been verified and officially closed.", "REPORT");
+                    final String reworkRemarks = adminRemarks;
+                    Optional<User> ceoOpt = userRepository.findById(ceoId);
+                    if (ceoOpt.isPresent()) {
+                        User ceo = ceoOpt.get();
+                        if (ceo.getEmail() != null && !ceo.getEmail().isEmpty()) {
+                            String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
+                            String subject = "RoadWise Alert: Repair Rework Required for PRJ-" + report.getId();
+                            String body = "Hello " + ceo.getFirstName() + ",\n\n" +
+                                    "The CPDO Admin has reviewed the proof of repair for " + safeRoadName + " (PRJ-" + report.getId() + ") and has requested a rework.\n\n" +
+                                    "Admin Remarks: " + reworkRemarks + "\n\n" +
+                                    "The project has been returned to your active queue. Please deploy the crew to address the feedback and upload new proof once completed.\n\n" +
+                                    "Best regards,\nRoadWise SJDM System";
+                            emailService.sendEmail(ceo.getEmail(), subject, body);
+                        }
                     }
                 }
             }
 
-            User actor;
-            String logCategory = "PROJECT";
-            String logAction = "STATUS_UPDATED_" + (newStatus != null ? newStatus.toUpperCase().replace(" ", "_") : "UNKNOWN");
-            String logDesc = isAutoArchivedNoDamage
-                    ? "CPDO inspected report without damage evidence. Ticket archived as 'No Action Required'."
-                    : "Project status transitioned to '" + newStatus + "' on " + report.getCityRoadName() + "." +
-                      (adminRemarks != null && !adminRemarks.trim().isEmpty() ? " Remarks: " + adminRemarks : "");
+            if (report.getUser() != null) {
+                Long brgyUserId = report.getUser().getId();
+                String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
 
-            String lifecycleAction = "STATUS_UPDATE";
-
-            if (isAutoArchivedNoDamage) {
-                logCategory = "QA";
-                logAction = "REPORT_INSPECTED_NO_DAMAGE";
-                lifecycleAction = "ARCHIVED_NO_DAMAGE";
-                actor = resolveActor(explicitUserId, adminId);
-            } else if (newStatus != null && (newStatus.equalsIgnoreCase("Validated") || newStatus.equalsIgnoreCase("Rejected"))) {
-                logCategory = "QA";
-                logAction = newStatus.equalsIgnoreCase("Validated") ? "REPORT_VALIDATED" : "REPORT_REJECTED";
-                lifecycleAction = newStatus.equalsIgnoreCase("Validated") ? "VALIDATED" : "REJECTED";
-                actor = resolveActor(explicitUserId, adminId);
-            } else if (newStatus != null && newStatus.equalsIgnoreCase("In Progress") && adminRemarks != null && !adminRemarks.trim().isEmpty()) {
-                logCategory = "QA";
-                logAction = "REPAIR_REWORK_REQUESTED";
-                lifecycleAction = "REPAIR_REWORK_REQUESTED";
-                actor = resolveActor(explicitUserId, adminId);
-            } else if (newStatus != null && (newStatus.equalsIgnoreCase("In Progress") || newStatus.equalsIgnoreCase("Completed"))) {
-                logCategory = "PROJECT";
-                logAction = newStatus.equalsIgnoreCase("In Progress") ? "REPAIR_IN_PROGRESS" : "REPAIR_COMPLETED";
-                lifecycleAction = newStatus.equalsIgnoreCase("In Progress") ? "IN_PROGRESS" : "COMPLETED";
-                actor = resolveActor(explicitUserId, ceoId);
-            } else if (newStatus != null && (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved") || newStatus.equalsIgnoreCase("Archived"))) {
-                logCategory = "QA";
-                logAction = "PROJECT_OFFICIALLY_CLOSED";
-                lifecycleAction = "CLOSED";
-                actor = resolveActor(explicitUserId, adminId);
-            } else {
-                actor = resolveActor(explicitUserId, adminId);
+                if (isAutoArchivedNoDamage) {
+                    notificationService.sendNotification(
+                            brgyUserId,
+                            "Report Inspected & Archived",
+                            "CPDO reviewed Report #PRJ-" + report.getId() + " for " + safeRoadName + ". Road confirmed in good condition; ticket has been archived.",
+                            "REPORT"
+                    );
+                } else if (newStatus.equalsIgnoreCase("Validated")) {
+                    notificationService.sendNotification(brgyUserId, "Report Validated", "Good news! Report #PRJ-" + report.getId() + " for " + safeRoadName + " has been validated by the CPDO.", "REPORT");
+                } else if (newStatus.equalsIgnoreCase("Rejected")) {
+                    String reason = (adminRemarks != null && !adminRemarks.isEmpty()) ? adminRemarks : "Review remarks for details.";
+                    notificationService.sendNotification(brgyUserId, "Report Rejected", "Report #PRJ-" + report.getId() + " requires corrections. Reason: " + reason, "REPORT");
+                } else if (newStatus.equalsIgnoreCase("In Progress")) {
+                    notificationService.sendNotification(brgyUserId, "Repair In Progress", "The City Engineering Office (CEO) is actively working on " + safeRoadName + " (ID: PRJ-" + report.getId() + ").", "REPORT");
+                } else if (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved") || newStatus.equalsIgnoreCase("Archived")) {
+                    notificationService.sendNotification(brgyUserId, "Project Officially Closed", "Success! The repair for #PRJ-" + report.getId() + " on " + safeRoadName + " has been verified and officially closed.", "REPORT");
+                }
             }
+        }
 
-            // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
-            reportStatusLogService.log(
-                    report,
-                    lifecycleAction,
-                    previousStatus,
-                    newStatus,
-                    adminRemarks,
-                    actor,
-                    "CPDO Admin",
-                    "ADMIN",
-                    report.getProofOfRepairImage()
-            );
+        String logCategory = "PROJECT";
+        String logAction = "STATUS_UPDATED_" + (newStatus != null ? newStatus.toUpperCase().replace(" ", "_") : "UNKNOWN");
+        String logDesc = isAutoArchivedNoDamage
+                ? "CPDO inspected report without damage evidence. Ticket archived as 'No Action Required'."
+                : "Project status transitioned to '" + newStatus + "' on " + report.getCityRoadName() + "." +
+                  (adminRemarks != null && !adminRemarks.trim().isEmpty() ? " Remarks: " + adminRemarks : "");
 
-            activityLogService.log(
-                    actor,
-                    logCategory,
-                    logAction,
-                    "#PRJ-" + String.format("%04d", report.getId()),
-                    logDesc,
-                    "SUCCESS",
-                    request
-            );
+        String lifecycleAction = "STATUS_UPDATE";
 
-            sendLiveUpdate();
-            return ResponseEntity.ok(isAutoArchivedNoDamage ? "ARCHIVED_NO_IMAGE" : "SUCCESS");
+        if (isAutoArchivedNoDamage) {
+            logCategory = "QA";
+            logAction = "REPORT_INSPECTED_NO_DAMAGE";
+            lifecycleAction = "ARCHIVED_NO_DAMAGE";
+        } else if (newStatus != null && (newStatus.equalsIgnoreCase("Validated") || newStatus.equalsIgnoreCase("Rejected"))) {
+            logCategory = "QA";
+            logAction = newStatus.equalsIgnoreCase("Validated") ? "REPORT_VALIDATED" : "REPORT_REJECTED";
+            lifecycleAction = newStatus.equalsIgnoreCase("Validated") ? "VALIDATED" : "REJECTED";
+        } else if (newStatus != null && newStatus.equalsIgnoreCase("In Progress") && adminRemarks != null && !adminRemarks.trim().isEmpty()) {
+            logCategory = "QA";
+            logAction = "REPAIR_REWORK_REQUESTED";
+            lifecycleAction = "REPAIR_REWORK_REQUESTED";
+        } else if (newStatus != null && (newStatus.equalsIgnoreCase("In Progress") || newStatus.equalsIgnoreCase("Completed"))) {
+            logCategory = "PROJECT";
+            logAction = newStatus.equalsIgnoreCase("In Progress") ? "REPAIR_IN_PROGRESS" : "REPAIR_COMPLETED";
+            lifecycleAction = newStatus.equalsIgnoreCase("In Progress") ? "IN_PROGRESS" : "COMPLETED";
+        } else if (newStatus != null && (newStatus.equalsIgnoreCase("Closed") || newStatus.equalsIgnoreCase("Resolved") || newStatus.equalsIgnoreCase("Archived"))) {
+            logCategory = "QA";
+            logAction = "PROJECT_OFFICIALLY_CLOSED";
+            lifecycleAction = "CLOSED";
+        }
 
-        }).orElse(ResponseEntity.notFound().build());
+        // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
+        reportStatusLogService.log(
+                report,
+                lifecycleAction,
+                previousStatus,
+                newStatus,
+                adminRemarks,
+                callingUser,
+                callingUser.getRole() != null ? callingUser.getRole() : "CPDO Admin",
+                isCeoStartRepair ? "ENGINEER" : "ADMIN",
+                report.getProofOfRepairImage()
+        );
+
+        activityLogService.log(
+                callingUser,
+                logCategory,
+                logAction,
+                "#PRJ-" + String.format("%04d", report.getId()),
+                logDesc,
+                "SUCCESS",
+                request
+        );
+
+        sendLiveUpdate();
+        return ResponseEntity.ok(isAutoArchivedNoDamage ? "ARCHIVED_NO_IMAGE" : "SUCCESS");
     }
 
     // ==========================================
-    // 3. UPDATE REPORT (RESUBMISSION BY OFFICIAL)
+    // 3. UPDATE REPORT (RESUBMISSION BY BARANGAY OFFICIAL)
     // ==========================================
     @PutMapping("/update/{id}")
     public ResponseEntity<?> updateReport(@PathVariable Long id,
@@ -730,7 +797,32 @@ public class RoadReportController {
                                           @RequestParam(value = "imageFile", required = false) MultipartFile imageFile,
                                           HttpServletRequest request) {
         try {
+            User callingUser = resolveUser(userId);
+
+            // 🛡️ CONTROL 6 RBAC: Ensure caller has valid user credentials
+            if (callingUser == null) {
+                return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Valid user identity is required to edit reports."));
+            }
+
             RoadReport existingReport = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
+
+            // 🛡️ CONTROL 6 RBAC: Only Barangay Officials or CPDO Admins can edit/resubmit
+            if (!isBarangayOfficial(callingUser) && !isCpdoAdmin(callingUser)) {
+                return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Only Barangay Officials can revise and resubmit damage reports."));
+            }
+
+            // 🛡️ CONTROL 7 SCOPING CHECK: Ensure Barangay Official owns the report being edited
+            if (isBarangayOfficial(callingUser)) {
+                if (existingReport.getBarangay() != null && callingUser.getBarangay() != null) {
+                    if (!existingReport.getBarangay().getId().equals(callingUser.getBarangay().getId())) {
+                        return ResponseEntity.status(403).body(Map.of(
+                                "error", "ACCESS_DENIED",
+                                "message", "Security Violation: You cannot edit inspection reports belonging to another barangay."
+                        ));
+                    }
+                }
+            }
+
             String previousStatus = existingReport.getStatus();
 
             if (description != null) existingReport.setDamageDescription(description);
@@ -851,8 +943,6 @@ public class RoadReportController {
             existingReport.setAdminRemarks(null);
             repository.save(existingReport);
 
-            User actor = (userId != null) ? userRepository.findById(userId).orElse(existingReport.getUser()) : existingReport.getUser();
-
             // 📋 LOG LIFECYCLE EVENT INTO AUDIT TRAIL
             reportStatusLogService.log(
                     existingReport,
@@ -860,7 +950,7 @@ public class RoadReportController {
                     previousStatus,
                     existingReport.getStatus(),
                     isResubmitted ? "Report revised and resubmitted with updated survey details." : "Report specifications updated.",
-                    actor,
+                    callingUser,
                     existingReport.getReportedBy(),
                     "Barangay Official",
                     existingReport.getDamageImage()
@@ -877,7 +967,7 @@ public class RoadReportController {
             }
 
             activityLogService.log(
-                    actor,
+                    callingUser,
                     "PROJECT",
                     isResubmitted ? "REPORT_RESUBMITTED" : "REPORT_UPDATED",
                     "#PRJ-" + String.format("%04d", existingReport.getId()),
@@ -895,16 +985,22 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 4. BATCH DISPATCH TO CEO (CPDO ADMIN)
+    // 4. BATCH DISPATCH TO CEO (CPDO ADMIN ONLY)
     // ==========================================
     @PutMapping("/dispatch-masterlist")
     public ResponseEntity<String> dispatchMasterlistToCEO(
             @RequestParam(value = "userId", required = false) Long userId,
             HttpServletRequest request) {
         try {
+            User callingUser = resolveUser(userId);
+
+            // 🛡️ CONTROL 6 RBAC: Strictly restricted to CPDO Admin
+            if (!isCpdoAdmin(callingUser)) {
+                return ResponseEntity.status(403).body("Access Denied: Only CPDO Administrators can dispatch the masterlist to the CEO priority pool.");
+            }
+
             List<RoadReport> allReports = repository.findAll();
             int dispatchedCount = 0;
-            User adminActor = resolveActor(userId, getAdminId());
 
             for (RoadReport report : allReports) {
                 if ("Validated".equalsIgnoreCase(report.getStatus().trim())) {
@@ -923,7 +1019,7 @@ public class RoadReportController {
                                 prev,
                                 "Dispatched to CEO",
                                 "Dispatched by CPDO to the City Engineer priority pool.",
-                                adminActor,
+                                callingUser,
                                 "CPDO Admin",
                                 "ADMIN",
                                 null
@@ -944,7 +1040,7 @@ public class RoadReportController {
                                 prev,
                                 "Archived",
                                 "Auto-archived during dispatch filter: No photographic damage evidence.",
-                                adminActor,
+                                callingUser,
                                 "CPDO Admin",
                                 "ADMIN",
                                 null
@@ -966,7 +1062,9 @@ public class RoadReportController {
                             "REPORT"
                     );
 
-                    userRepository.findById(ceoId).ifPresent(ceo -> {
+                    Optional<User> ceoOpt = userRepository.findById(ceoId);
+                    if (ceoOpt.isPresent()) {
+                        User ceo = ceoOpt.get();
                         if (ceo.getEmail() != null && !ceo.getEmail().isEmpty()) {
                             String subject = "RoadWise: Masterlist Dispatched";
                             String body = "Hello " + ceo.getFirstName() + ",\n\n" +
@@ -975,11 +1073,11 @@ public class RoadReportController {
                                     "Best regards,\nRoadWise SJDM System";
                             emailService.sendEmail(ceo.getEmail(), subject, body);
                         }
-                    });
+                    }
                 }
 
                 activityLogService.log(
-                        adminActor,
+                        callingUser,
                         "PROJECT",
                         "MASTERLIST_DISPATCHED",
                         "CEO_PRIORITY_QUEUE",
@@ -1001,14 +1099,21 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 5B. CEO BATCH DEFER REPAIRS (PENDING BUDGET)
+    // 5B. CEO BATCH DEFER REPAIRS (PENDING BUDGET) - CEO ONLY
     // ==========================================
     @PostMapping("/batch/defer")
     public ResponseEntity<?> batchDeferReports(@RequestBody Map<String, Object> payload, HttpServletRequest request) {
         try {
+            Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
+            User callingUser = resolveUser(explicitUserId);
+
+            // 🛡️ CONTROL 6 RBAC: Strictly restricted to City Engineer (CEO)
+            if (!isCityEngineer(callingUser)) {
+                return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Only the City Engineering Office (CEO) is authorized to defer project repairs."));
+            }
+
             String reason = (String) payload.get("repairRemarks");
             Object idsObj = payload.get("reportIds");
-            Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
 
             if (reason == null || reason.trim().isEmpty()) {
                 return ResponseEntity.badRequest().body(Map.of("error", "Deferral reason is required."));
@@ -1030,8 +1135,6 @@ public class RoadReportController {
 
             if (reportsToDefer.isEmpty()) return ResponseEntity.status(404).body(Map.of("error", "Could not find the selected reports in the database."));
 
-            User ceoActor = resolveActor(explicitUserId, getCeoId());
-
             for (RoadReport r : reportsToDefer) {
                 String prev = r.getStatus();
                 r.setStatus("Pending Budget");
@@ -1043,7 +1146,7 @@ public class RoadReportController {
                         prev,
                         "Pending Budget",
                         reason,
-                        ceoActor,
+                        callingUser,
                         "City Engineer",
                         "ENGINEER",
                         null
@@ -1082,7 +1185,7 @@ public class RoadReportController {
             }
 
             activityLogService.log(
-                    ceoActor,
+                    callingUser,
                     "PROJECT",
                     "REPAIRS_BATCH_DEFERRED",
                     "BATCH_DEFERRAL",
@@ -1101,7 +1204,7 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 5. CEO MARK AS COMPLETED (WITH PROOF)
+    // 5. CEO MARK AS COMPLETED (WITH PROOF) - CEO ONLY
     // ==========================================
     @PostMapping(value = "/{id}/complete", consumes = {"multipart/form-data"})
     public ResponseEntity<?> completeReport(
@@ -1112,6 +1215,13 @@ public class RoadReportController {
             HttpServletRequest request) {
 
         try {
+            User callingUser = resolveUser(userId);
+
+            // 🛡️ CONTROL 6 RBAC: Strictly restricted to City Engineer (CEO)
+            if (!isCityEngineer(callingUser)) {
+                return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Only the City Engineering Office (CEO) can submit repair proof and mark projects as Completed."));
+            }
+
             RoadReport report = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
             String previousStatus = report.getStatus();
 
@@ -1131,15 +1241,13 @@ public class RoadReportController {
 
             sendStatusUpdateEmail(report, "Completed", repairRemarks);
 
-            User ceoActor = resolveActor(userId, getCeoId());
-
             reportStatusLogService.log(
                     report,
                     "COMPLETED",
                     previousStatus,
                     "Completed",
                     repairRemarks,
-                    ceoActor,
+                    callingUser,
                     "City Engineer",
                     "ENGINEER",
                     report.getProofOfRepairImage()
@@ -1154,7 +1262,7 @@ public class RoadReportController {
             );
 
             activityLogService.log(
-                    ceoActor,
+                    callingUser,
                     "PROJECT",
                     "REPAIR_COMPLETED",
                     "#PRJ-" + String.format("%04d", report.getId()),
@@ -1173,7 +1281,7 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 5B. CEO DEFER REPAIR (SINGLE)
+    // 5B. CEO DEFER REPAIR (SINGLE) - CEO ONLY
     // ==========================================
     @PutMapping("/{id}/defer")
     public ResponseEntity<?> deferReport(
@@ -1181,12 +1289,19 @@ public class RoadReportController {
             @RequestBody Map<String, String> payload,
             HttpServletRequest request) {
         try {
+            String passedUserIdStr = payload.get("userId");
+            Long explicitUserId = passedUserIdStr != null ? Long.valueOf(passedUserIdStr) : null;
+            User callingUser = resolveUser(explicitUserId);
+
+            // 🛡️ CONTROL 6 RBAC: Strictly restricted to City Engineer (CEO)
+            if (!isCityEngineer(callingUser)) {
+                return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Only the City Engineering Office (CEO) is authorized to defer project repairs."));
+            }
+
             RoadReport report = repository.findById(id).orElseThrow(() -> new RuntimeException("Report not found"));
             String previousStatus = report.getStatus();
 
             String reason = payload.get("repairRemarks");
-            String passedUserIdStr = payload.get("userId");
-            Long explicitUserId = passedUserIdStr != null ? Long.valueOf(passedUserIdStr) : null;
 
             report.setRepairRemarks(reason);
             report.setStatus("Pending Budget");
@@ -1194,15 +1309,13 @@ public class RoadReportController {
 
             sendStatusUpdateEmail(report, "Pending Budget", reason);
 
-            User ceoActor = resolveActor(explicitUserId, getCeoId());
-
             reportStatusLogService.log(
                     report,
                     "PENDING_BUDGET",
                     previousStatus,
                     "Pending Budget",
                     reason,
-                    ceoActor,
+                    callingUser,
                     "City Engineer",
                     "ENGINEER",
                     null
@@ -1226,7 +1339,7 @@ public class RoadReportController {
             }
 
             activityLogService.log(
-                    ceoActor,
+                    callingUser,
                     "PROJECT",
                     "REPAIR_DEFERRED",
                     "#PRJ-" + String.format("%04d", report.getId()),
@@ -1333,16 +1446,22 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 8. ADMIN BATCH ARCHIVE (SILENT HOUSEKEEPING)
+    // 8. ADMIN BATCH ARCHIVE (CPDO ADMIN ONLY)
     // ==========================================
     @PostMapping("/batch/archive")
     public ResponseEntity<?> batchArchiveReports(
             @RequestBody Map<String, Object> payload,
             HttpServletRequest request) {
         try {
-            Object idsObj = payload.get("reportIds");
             Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
+            User callingUser = resolveUser(explicitUserId);
 
+            // 🛡️ CONTROL 6 RBAC: Strictly restricted to CPDO Admin
+            if (!isCpdoAdmin(callingUser)) {
+                return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Only CPDO Administrators are authorized to batch archive project records."));
+            }
+
+            Object idsObj = payload.get("reportIds");
             if (idsObj == null) {
                 return ResponseEntity.badRequest().body(Map.of("error", "No reports selected for archiving."));
             }
@@ -1360,7 +1479,6 @@ public class RoadReportController {
 
             if (reportsToArchive.isEmpty()) return ResponseEntity.status(404).body(Map.of("error", "Could not find the selected reports in the database."));
 
-            User adminActor = resolveActor(explicitUserId, getAdminId());
             int archivedCount = 0;
             for (RoadReport r : reportsToArchive) {
                 if ("Pending Budget".equalsIgnoreCase(r.getStatus())) {
@@ -1375,7 +1493,7 @@ public class RoadReportController {
                             prev,
                             "Archived",
                             "Archived during CPDO batch housekeeping.",
-                            adminActor,
+                            callingUser,
                             "CPDO Admin",
                             "ADMIN",
                             null
@@ -1386,7 +1504,7 @@ public class RoadReportController {
             repository.saveAll(reportsToArchive);
 
             activityLogService.log(
-                    adminActor,
+                    callingUser,
                     "PROJECT",
                     "BATCH_ARCHIVED",
                     "ARCHIVE_POOL",
@@ -1406,13 +1524,20 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 9. ENTERPRISE ANNUAL AUDIT ROLLOVER
+    // 9. ENTERPRISE ANNUAL AUDIT ROLLOVER (CPDO ADMIN ONLY)
     // ==========================================
     @PostMapping("/rollover-annual-cycle")
     public ResponseEntity<?> executeAnnualRollover(
             @RequestParam(value = "userId", required = false) Long userId,
             HttpServletRequest request) {
         try {
+            User callingUser = resolveUser(userId);
+
+            // 🛡️ CONTROL 6 RBAC: Strictly restricted to CPDO Admin
+            if (!isCpdoAdmin(callingUser)) {
+                return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Only CPDO Administrators can execute the annual inventory rollover cycle."));
+            }
+
             int archivedCount = repository.archiveAnnualCycleReports();
             List<User> allUsers = userRepository.findAll();
 
@@ -1439,9 +1564,8 @@ public class RoadReportController {
                 }
             }
 
-            User adminActor = resolveActor(userId, getAdminId());
             activityLogService.log(
-                    adminActor,
+                    callingUser,
                     "SYSTEM",
                     "ANNUAL_ROLLOVER_EXECUTED",
                     "ANNUAL_CYCLE",
@@ -1510,7 +1634,7 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 11. CPDO ADMIN: ISSUE DEADLINE REMINDER / EXPEDITE NOTICE
+    // 11. CPDO ADMIN: ISSUE DEADLINE REMINDER / EXPEDITE NOTICE (CPDO ONLY)
     // ==========================================
     @PostMapping("/{id}/remind-due")
     public ResponseEntity<?> sendDeadlineReminder(
@@ -1518,6 +1642,16 @@ public class RoadReportController {
             @RequestBody(required = false) Map<String, Object> payload,
             HttpServletRequest request) {
         try {
+            Long explicitUserId = (payload != null && payload.get("userId") != null)
+                    ? Long.valueOf(payload.get("userId").toString())
+                    : null;
+            User callingUser = resolveUser(explicitUserId);
+
+            // 🛡️ CONTROL 6 RBAC: Strictly restricted to CPDO Admin
+            if (!isCpdoAdmin(callingUser)) {
+                return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Only CPDO Administrators can issue deadline reminders to the City Engineer."));
+            }
+
             RoadReport report = repository.findById(id)
                     .orElseThrow(() -> new RuntimeException("Report not found"));
 
@@ -1561,11 +1695,6 @@ public class RoadReportController {
             report.setLastReminderSent(nowPst);
             repository.save(report);
 
-            Long explicitUserId = (payload != null && payload.get("userId") != null)
-                    ? Long.valueOf(payload.get("userId").toString())
-                    : null;
-            User adminActor = resolveActor(explicitUserId, getAdminId());
-
             Long ceoId = getCeoId();
             String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
             String notifMsg = "CPDO Admin has flagged PRJ-" + String.format("%04d", report.getId()) + " (" + safeRoadName + "). Status: " + urgencyLabel + ". Please prioritize site completion or report progress.";
@@ -1573,7 +1702,9 @@ public class RoadReportController {
             if (ceoId != null) {
                 notificationService.sendNotification(ceoId, notifTitle, notifMsg, notifType);
 
-                userRepository.findById(ceoId).ifPresent(ceo -> {
+                Optional<User> ceoOpt = userRepository.findById(ceoId);
+                if (ceoOpt.isPresent()) {
+                    User ceo = ceoOpt.get();
                     if (ceo.getEmail() != null && !ceo.getEmail().trim().isEmpty()) {
                         String emailSubject = "RoadWise Alert: " + notifTitle + " [PRJ-" + String.format("%04d", report.getId()) + "]";
                         String emailBody = "Hello " + ceo.getFirstName() + ",\n\n" +
@@ -1586,7 +1717,7 @@ public class RoadReportController {
                                 "Best regards,\nRoadWise CPDO Administration";
                         emailService.sendEmail(ceo.getEmail(), emailSubject, emailBody);
                     }
-                });
+                }
             }
 
             reportStatusLogService.log(
@@ -1595,14 +1726,14 @@ public class RoadReportController {
                     report.getStatus(),
                     report.getStatus(),
                     "CPDO Admin issued an expedite/deadline reminder to the City Engineer (" + urgencyLabel + ").",
-                    adminActor,
+                    callingUser,
                     "CPDO Admin",
                     "ADMIN",
                     null
             );
 
             activityLogService.log(
-                    adminActor,
+                    callingUser,
                     "PROJECT",
                     "DEADLINE_REMINDER_SENT",
                     "#PRJ-" + String.format("%04d", report.getId()),
@@ -1625,7 +1756,7 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 12. CEO: SUBMIT REQUEST FOR TIME EXTENSION
+    // 12. CEO: SUBMIT REQUEST FOR TIME EXTENSION (CEO ONLY)
     // ==========================================
     @PostMapping("/{id}/request-extension")
     public ResponseEntity<?> requestExtension(
@@ -1633,12 +1764,19 @@ public class RoadReportController {
             @RequestBody Map<String, Object> payload,
             HttpServletRequest request) {
         try {
+            Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
+            User callingUser = resolveUser(explicitUserId);
+
+            // 🛡️ CONTROL 6 RBAC: Strictly restricted to City Engineer (CEO)
+            if (!isCityEngineer(callingUser)) {
+                return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Only the City Engineering Office (CEO) can file schedule extension requests."));
+            }
+
             RoadReport report = repository.findById(id)
                     .orElseThrow(() -> new RuntimeException("Report not found"));
 
             String targetDateStr = (String) payload.get("extensionTargetDate");
             String reason = (String) payload.get("extensionReason");
-            Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
 
             if (targetDateStr == null || targetDateStr.trim().isEmpty()) {
                 return ResponseEntity.badRequest().body(Map.of("error", "Proposed extension date is required."));
@@ -1663,7 +1801,6 @@ public class RoadReportController {
             report.setExtensionStatus("PENDING");
             repository.save(report);
 
-            User ceoActor = resolveActor(explicitUserId, getCeoId());
             Long adminId = getAdminId();
             String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
 
@@ -1680,14 +1817,14 @@ public class RoadReportController {
                     report.getStatus(),
                     report.getStatus(),
                     "CEO filed a formal time extension request to " + proposedDate + ". Reason: " + reason,
-                    ceoActor,
+                    callingUser,
                     "City Engineer",
                     "ENGINEER",
                     null
             );
 
             activityLogService.log(
-                    ceoActor,
+                    callingUser,
                     "PROJECT",
                     "EXTENSION_REQUESTED",
                     "#PRJ-" + String.format("%04d", report.getId()),
@@ -1711,7 +1848,7 @@ public class RoadReportController {
     }
 
     // ==========================================
-    // 13. CPDO ADMIN: REVIEW TIME EXTENSION (APPROVE/ REJECT)
+    // 13. CPDO ADMIN: REVIEW TIME EXTENSION (APPROVE / REJECT) - CPDO ONLY
     // ==========================================
     @PutMapping("/{id}/review-extension")
     public ResponseEntity<?> reviewExtension(
@@ -1719,12 +1856,19 @@ public class RoadReportController {
             @RequestBody Map<String, Object> payload,
             HttpServletRequest request) {
         try {
+            Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
+            User callingUser = resolveUser(explicitUserId);
+
+            // 🛡️ CONTROL 6 RBAC: Strictly restricted to CPDO Admin
+            if (!isCpdoAdmin(callingUser)) {
+                return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Only CPDO Administrators are authorized to review and approve/reject extension requests."));
+            }
+
             RoadReport report = repository.findById(id)
                     .orElseThrow(() -> new RuntimeException("Report not found"));
 
             String decision = (String) payload.get("decision");
             String adminRemarks = (String) payload.get("adminRemarks");
-            Long explicitUserId = payload.get("userId") != null ? Long.valueOf(payload.get("userId").toString()) : null;
 
             if (decision == null || (!decision.equalsIgnoreCase("APPROVED") && !decision.equalsIgnoreCase("REJECTED"))) {
                 return ResponseEntity.badRequest().body(Map.of("error", "Decision must be either 'APPROVED' or 'REJECTED'."));
@@ -1747,7 +1891,6 @@ public class RoadReportController {
 
             repository.save(report);
 
-            User adminActor = resolveActor(explicitUserId, getAdminId());
             Long ceoId = getCeoId();
             String safeRoadName = report.getCityRoadName() != null ? report.getCityRoadName() : "a road";
 
@@ -1759,7 +1902,9 @@ public class RoadReportController {
 
                 notificationService.sendNotification(ceoId, title, msg, isApproved ? "REPORT" : "WARNING");
 
-                userRepository.findById(ceoId).ifPresent(ceo -> {
+                Optional<User> ceoOpt = userRepository.findById(ceoId);
+                if (ceoOpt.isPresent()) {
+                    User ceo = ceoOpt.get();
                     if (ceo.getEmail() != null && !ceo.getEmail().trim().isEmpty()) {
                         String subject = "RoadWise: " + title + " [PRJ-" + String.format("%04d", report.getId()) + "]";
                         String body = "Hello " + ceo.getFirstName() + ",\n\n" +
@@ -1770,7 +1915,7 @@ public class RoadReportController {
                                 "Best regards,\nRoadWise CPDO Administration";
                         emailService.sendEmail(ceo.getEmail(), subject, body);
                     }
-                });
+                }
             }
 
             String actionLog = isApproved ? "EXTENSION_APPROVED" : "EXTENSION_REJECTED";
@@ -1784,14 +1929,14 @@ public class RoadReportController {
                     report.getStatus(),
                     report.getStatus(),
                     logRemarks,
-                    adminActor,
+                    callingUser,
                     "CPDO Admin",
                     "ADMIN",
                     null
             );
 
             activityLogService.log(
-                    adminActor,
+                    callingUser,
                     "QA",
                     actionLog,
                     "#PRJ-" + String.format("%04d", report.getId()),

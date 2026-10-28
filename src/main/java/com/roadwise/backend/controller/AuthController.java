@@ -1,9 +1,9 @@
 package com.roadwise.backend.controller;
 
-import com.roadwise.backend.model.User;
 import com.roadwise.backend.model.SystemSettings;
-import com.roadwise.backend.repository.UserRepository;
+import com.roadwise.backend.model.User;
 import com.roadwise.backend.repository.SystemSettingsRepository;
+import com.roadwise.backend.repository.UserRepository;
 import com.roadwise.backend.service.ActivityLogService;
 import com.roadwise.backend.service.EmailService;
 import com.roadwise.backend.service.NotificationService;
@@ -195,12 +195,35 @@ public class AuthController {
                 user.setLockoutUntil(LocalDateTime.now().plusSeconds(penaltySeconds));
 
                 if (attempts == 5 || attempts == 15) {
+                    Long adminId = getAdminId();
+
+                    // 1. In-app bell notification
                     notificationService.sendNotification(
-                            getAdminId(),
+                            adminId,
                             "Security Alert: Brute-Force Activity",
                             "Progressive lockout triggered for user: '" + username + "' due to " + attempts + " consecutive failed attempts.",
                             "SECURITY"
                     );
+
+                    // 2. 🚀 Send high-priority alert email to CPDO Admin
+                    Optional<User> adminOpt = userRepository.findById(adminId);
+                    if (adminOpt.isPresent() && adminOpt.get().getEmail() != null && !adminOpt.get().getEmail().trim().isEmpty()) {
+                        String adminEmail = adminOpt.get().getEmail();
+                        String subject = "🚨 RoadWise Alert: Account Locked Due to Multiple Failed Logins";
+                        String body = "Hello " + adminOpt.get().getFirstName() + ",\n\n" +
+                                "The RoadWise automated security system has detected repeated failed authentication attempts:\n\n" +
+                                "• Targeted Account: " + username + " (" + formattedUserId + ")\n" +
+                                "• Consecutive Failed Attempts: " + attempts + "\n" +
+                                "• Progressive Lockout Window: " + penaltySeconds + " second(s)\n" +
+                                "• Time of Lockout: " + LocalDateTime.now() + "\n\n" +
+                                "The account has been temporarily locked to protect against brute-force attacks. You may review the full forensic details in your CPDO Activity Logs.\n\n" +
+                                "Best regards,\nRoadWise SJDM Security Monitor";
+                        try {
+                            emailService.sendEmail(adminEmail, subject, body);
+                        } catch (Exception e) {
+                            System.err.println(">>> [WARN] Failed to send security alert email to CPDO: " + e.getMessage());
+                        }
+                    }
                 }
             }
 
@@ -251,6 +274,7 @@ public class AuthController {
             long secondsElapsed = Duration.between(existingSession.generatedAt, LocalDateTime.now()).getSeconds();
             if (secondsElapsed < 60) {
                 long waitSeconds = 60 - secondsElapsed;
+
                 return ResponseEntity.status(429).body(Map.of(
                         "error", "A verification code was recently dispatched. Please wait " + waitSeconds + " second(s) before requesting a new code.",
                         "retryAfterSeconds", waitSeconds,
@@ -313,6 +337,7 @@ public class AuthController {
             long secondsElapsed = Duration.between(existingSession.generatedAt, LocalDateTime.now()).getSeconds();
             if (secondsElapsed < 60) {
                 long waitSeconds = 60 - secondsElapsed;
+
                 return ResponseEntity.status(429).body(Map.of(
                         "error", "Please wait " + waitSeconds + " second(s) before requesting another verification code.",
                         "retryAfterSeconds", waitSeconds
@@ -444,6 +469,7 @@ public class AuthController {
             long secondsElapsed = Duration.between(existingReset.generatedAt, LocalDateTime.now()).getSeconds();
             if (secondsElapsed < 60) {
                 long waitSeconds = 60 - secondsElapsed;
+
                 return ResponseEntity.status(429).body(Map.of(
                         "error", "A recovery code was recently sent. Please wait " + waitSeconds + " second(s) before requesting a new code.",
                         "retryAfterSeconds", waitSeconds

@@ -57,12 +57,21 @@ public class UserController {
         return password != null && PASSWORD_PATTERN.matcher(password).matches();
     }
 
+    // ==========================================
+    // 🛡️ CONTROL 6 RBAC: CPDO ADMIN VERIFICATION
+    // ==========================================
     private Long getAdminId() {
         return userRepository.findAll().stream()
                 .filter(user -> user.getRole() != null && (user.getRole().equalsIgnoreCase("CPDO Admin") || user.getRole().equalsIgnoreCase("Admin")))
                 .map(User::getId)
                 .findFirst()
                 .orElse(1L);
+    }
+
+    private boolean isCpdoAdmin(User user) {
+        if (user == null || user.getRole() == null) return false;
+        String r = user.getRole().trim();
+        return r.equalsIgnoreCase("CPDO Admin") || r.equalsIgnoreCase("Admin");
     }
 
     // ==========================================
@@ -273,8 +282,7 @@ public class UserController {
         }
 
         Optional<User> adminOpt = userRepository.findById(adminId);
-        if (adminOpt.isEmpty() || adminOpt.get().getRole() == null ||
-                (!adminOpt.get().getRole().equalsIgnoreCase("CPDO Admin") && !adminOpt.get().getRole().equalsIgnoreCase("Admin"))) {
+        if (adminOpt.isEmpty() || !isCpdoAdmin(adminOpt.get())) {
             return ResponseEntity.status(403).body(Map.of("error",
                     "Access Denied: Only CPDO Administrators are authorized to provision official accounts."));
         }
@@ -372,13 +380,23 @@ public class UserController {
     }
 
     // ==========================================
-    // 7. ADMIN: UPDATE OFFICIAL RECORD & STATUS (HIGH PRIVILEGE ACTION)
+    // 7. ADMIN: UPDATE OFFICIAL RECORD & STATUS (CONTROL 6 RBAC PROTECTED)
     // ==========================================
     @PutMapping("/{id}/manage")
     public ResponseEntity<?> manageUserRecord(
             @PathVariable Long id,
             @RequestBody Map<String, String> updates,
             HttpServletRequest request) {
+
+        // 🛡️ CONTROL 6 RBAC: Validate calling administrator
+        String adminIdStr = updates.get("adminId");
+        Long adminId = (adminIdStr != null && !adminIdStr.trim().isEmpty()) ? Long.valueOf(adminIdStr.trim()) : null;
+        User adminActor = (adminId != null) ? userRepository.findById(adminId).orElse(null) : null;
+
+        if (!isCpdoAdmin(adminActor)) {
+            return ResponseEntity.status(403).body(Map.of("error",
+                    "Access Denied: Only CPDO Administrators are authorized to update official records."));
+        }
 
         Optional<User> userOpt = userRepository.findById(id);
         if (userOpt.isEmpty()) {
@@ -426,10 +444,6 @@ public class UserController {
 
         userRepository.save(user);
 
-        String adminIdStr = updates.get("adminId");
-        Long adminId = (adminIdStr != null && !adminIdStr.isEmpty()) ? Long.valueOf(adminIdStr) : getAdminId();
-        User adminActor = userRepository.findById(adminId).orElse(null);
-
         String statusNotice = (newStatus != null && !newStatus.equalsIgnoreCase(oldStatus)) ? " Status changed to '" + newStatus + "'." : "";
         activityLogService.log(
                 adminActor,
@@ -445,13 +459,23 @@ public class UserController {
     }
 
     // ==========================================
-    // 8. ADMIN: EMERGENCY PASSWORD RESET
+    // 8. ADMIN: EMERGENCY PASSWORD RESET (CONTROL 5 & 6 RBAC PROTECTED)
     // ==========================================
     @PutMapping("/{id}/emergency-reset")
     public ResponseEntity<?> emergencyPasswordReset(
             @PathVariable Long id,
             @RequestBody(required = false) Map<String, String> payload,
             HttpServletRequest request) {
+
+        // 🛡️ CONTROL 6 RBAC: Validate calling administrator BEFORE changing any data
+        String adminIdStr = (payload != null) ? payload.get("adminId") : null;
+        Long adminId = (adminIdStr != null && !adminIdStr.trim().isEmpty()) ? Long.valueOf(adminIdStr.trim()) : null;
+        User adminActor = (adminId != null) ? userRepository.findById(adminId).orElse(null) : null;
+
+        if (!isCpdoAdmin(adminActor)) {
+            return ResponseEntity.status(403).body(Map.of("error",
+                    "Access Denied: Only CPDO Administrators are authorized to execute emergency credential resets."));
+        }
 
         Optional<User> userOpt = userRepository.findById(id);
         if (userOpt.isEmpty()) {
@@ -464,6 +488,7 @@ public class UserController {
         user.setLockoutUntil(null);
         userRepository.save(user);
 
+        // Bell notification
         notificationService.sendNotification(
                 user.getId(),
                 "Security Alert",
@@ -471,9 +496,21 @@ public class UserController {
                 "SECURITY"
         );
 
-        String adminIdStr = (payload != null) ? payload.get("adminId") : null;
-        Long adminId = (adminIdStr != null && !adminIdStr.isEmpty()) ? Long.valueOf(adminIdStr) : getAdminId();
-        User adminActor = userRepository.findById(adminId).orElse(null);
+        // 🚀 Email alert to the official with their temporary access key
+        if (user.getEmail() != null && !user.getEmail().trim().isEmpty()) {
+            String subject = "RoadWise - Emergency Password Reset Notice";
+            String body = "Hello " + user.getFirstName() + ",\n\n" +
+                    "Your RoadWise account password has been reset by the CPDO Administrator.\n\n" +
+                    "• Temporary Password: RoadWise2026!\n\n" +
+                    "Please log in here: " + frontendUrl + "/login.html\n\n" +
+                    "For security purposes, you must change your password immediately upon login.\n\n" +
+                    "Best regards,\nCPDO Administrator - City of San Jose del Monte";
+            try {
+                emailService.sendEmail(user.getEmail(), subject, body);
+            } catch (Exception e) {
+                System.err.println("Emergency reset email notification failed: " + e.getMessage());
+            }
+        }
 
         activityLogService.log(
                 adminActor,
@@ -517,6 +554,10 @@ public class UserController {
         }
 
         User currentAdmin = currentAdminOpt.get();
+
+        if (!isCpdoAdmin(currentAdmin)) {
+            return ResponseEntity.status(403).body(Map.of("error", "Access Denied: Only CPDO Administrators can execute administrative turnover."));
+        }
 
         boolean adminMatches = false;
         String storedAdminPass = currentAdmin.getPassword();

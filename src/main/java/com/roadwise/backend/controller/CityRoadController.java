@@ -1,8 +1,13 @@
 package com.roadwise.backend.controller;
 
+import com.roadwise.backend.model.Barangay;
 import com.roadwise.backend.model.CityRoad;
+import com.roadwise.backend.model.User;
 import com.roadwise.backend.repository.BarangayRepository;
 import com.roadwise.backend.repository.CityRoadRepository;
+import com.roadwise.backend.repository.UserRepository;
+import com.roadwise.backend.service.ActivityLogService;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -21,6 +26,30 @@ public class CityRoadController {
 
     @Autowired
     private BarangayRepository barangayRepository;
+
+    @Autowired
+    private UserRepository userRepository;
+
+    // 🚀 INJECTED ACTIVITY LOG AUDIT SERVICE
+    @Autowired
+    private ActivityLogService activityLogService;
+
+    // ==========================================
+    // 🛡️ CONTROL 6 RBAC: CPDO ADMIN VERIFICATION
+    // ==========================================
+    private Long getAdminId() {
+        return userRepository.findAll().stream()
+                .filter(user -> user.getRole() != null && (user.getRole().equalsIgnoreCase("CPDO Admin") || user.getRole().equalsIgnoreCase("Admin")))
+                .map(User::getId)
+                .findFirst()
+                .orElse(1L);
+    }
+
+    private boolean isCpdoAdmin(User user) {
+        if (user == null || user.getRole() == null) return false;
+        String r = user.getRole().trim();
+        return r.equalsIgnoreCase("CPDO Admin") || r.equalsIgnoreCase("Admin");
+    }
 
     // ==========================================
     // 1. GET ALL ROADS (City-wide CPDO & CEO Oversight)
@@ -45,15 +74,30 @@ public class CityRoadController {
     }
 
     // ==========================================
-    // 3. ADD NEW CITY ROAD (WITH VALIDATION & SMART AUTO-ID)
+    // 3. ADD NEW CITY ROAD (WITH RBAC, VALIDATION & SMART AUTO-ID)
     // ==========================================
     @PostMapping
-    public ResponseEntity<?> createCityRoad(@RequestBody CityRoad cityRoad) {
+    public ResponseEntity<?> createCityRoad(
+            @RequestBody CityRoad cityRoad,
+            @RequestParam(value = "userId", required = false) Long userId,
+            HttpServletRequest request) {
+
+        // 🛡️ CONTROL 6 RBAC: Admin Verification
+        Long adminId = (userId != null) ? userId : getAdminId();
+        User adminActor = userRepository.findById(adminId).orElse(null);
+        if (!isCpdoAdmin(adminActor)) {
+            return ResponseEntity.status(403).body("Access Denied: Only CPDO Administrators can register new city roads.");
+        }
+
+        if (cityRoad == null || cityRoad.getRoadName() == null || cityRoad.getRoadName().trim().isEmpty()) {
+            return ResponseEntity.badRequest().body("Road name is mandatory.");
+        }
+
         if (cityRoad.getBarangay() == null || cityRoad.getBarangay().getId() == null) {
             return ResponseEntity.badRequest().body("A valid Barangay ID is required to register a road.");
         }
 
-        String cleanedName = cityRoad.getRoadName() != null ? cityRoad.getRoadName().trim() : "";
+        String cleanedName = cityRoad.getRoadName().trim();
         Long brgyId = cityRoad.getBarangay().getId();
 
         if (cityRoadRepository.existsByRoadNameIgnoreCaseAndBarangayId(cleanedName, brgyId)) {
@@ -61,6 +105,12 @@ public class CityRoadController {
         }
 
         cityRoad.setRoadName(cleanedName);
+
+        // Ensure full entity mapping
+        Barangay assignedBarangay = barangayRepository.findById(brgyId).orElse(null);
+        if (assignedBarangay != null) {
+            cityRoad.setBarangay(assignedBarangay);
+        }
 
         // Smart Auto-Generator Logic
         CityRoad lastRoad = cityRoadRepository.findFirstByOrderByIdDesc();
@@ -87,6 +137,20 @@ public class CityRoadController {
 
         cityRoad.setRoadId(newRoadId);
         CityRoad savedRoad = cityRoadRepository.save(cityRoad);
+
+        // ⏱️ AUDIT LOG: Attributed to Admin under SYSTEM category
+        String brgyName = (assignedBarangay != null) ? assignedBarangay.getBarangayName() : "Barangay #" + brgyId;
+
+        activityLogService.log(
+                adminActor,
+                "SYSTEM",
+                "CITY_ROAD_CREATED",
+                savedRoad.getRoadId(),
+                "Registered new city road: '" + cleanedName + "' under " + brgyName + ".",
+                "SUCCESS",
+                request
+        );
+
         return ResponseEntity.ok(savedRoad);
     }
 
@@ -101,17 +165,33 @@ public class CityRoadController {
     }
 
     // ==========================================
-    // 5. UPDATE AN EXISTING CITY ROAD
+    // 5. UPDATE AN EXISTING CITY ROAD (WITH RBAC & AUDIT LOG)
     // ==========================================
     @PutMapping("/{id}")
-    public ResponseEntity<?> updateCityRoad(@PathVariable Long id, @RequestBody CityRoad updatedInfo) {
+    public ResponseEntity<?> updateCityRoad(
+            @PathVariable Long id,
+            @RequestBody CityRoad updatedInfo,
+            @RequestParam(value = "userId", required = false) Long userId,
+            HttpServletRequest request) {
+
+        // 🛡️ CONTROL 6 RBAC: Admin Verification
+        Long adminId = (userId != null) ? userId : getAdminId();
+        User adminActor = userRepository.findById(adminId).orElse(null);
+        if (!isCpdoAdmin(adminActor)) {
+            return ResponseEntity.status(403).body("Access Denied: Only CPDO Administrators can update city road details.");
+        }
+
         Optional<CityRoad> existingOpt = cityRoadRepository.findById(id);
         if (existingOpt.isEmpty()) {
             return ResponseEntity.notFound().build();
         }
 
+        if (updatedInfo == null || updatedInfo.getRoadName() == null || updatedInfo.getRoadName().trim().isEmpty()) {
+            return ResponseEntity.badRequest().body("Road name cannot be empty.");
+        }
+
         CityRoad existingRoad = existingOpt.get();
-        String cleanedName = updatedInfo.getRoadName() != null ? updatedInfo.getRoadName().trim() : "";
+        String cleanedName = updatedInfo.getRoadName().trim();
         Long brgyId = (updatedInfo.getBarangay() != null && updatedInfo.getBarangay().getId() != null)
                 ? updatedInfo.getBarangay().getId()
                 : (existingRoad.getBarangay() != null ? existingRoad.getBarangay().getId() : null);
@@ -126,6 +206,18 @@ public class CityRoadController {
         existingRoad.setTerrainType(updatedInfo.getTerrainType());
 
         CityRoad savedRoad = cityRoadRepository.save(existingRoad);
+
+        // ⏱️ AUDIT LOG
+        activityLogService.log(
+                adminActor,
+                "SYSTEM",
+                "CITY_ROAD_UPDATED",
+                savedRoad.getRoadId() != null ? savedRoad.getRoadId() : ("#ROAD-" + savedRoad.getId()),
+                "Updated specifications for road: '" + cleanedName + "'.",
+                "SUCCESS",
+                request
+        );
+
         return ResponseEntity.ok(savedRoad);
     }
 }

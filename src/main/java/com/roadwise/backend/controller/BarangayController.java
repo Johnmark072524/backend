@@ -36,12 +36,11 @@ public class BarangayController {
     @Autowired
     private UserRepository userRepository;
 
-    // 🚀 INJECTED ACTIVITY LOG AUDIT SERVICE
     @Autowired
     private ActivityLogService activityLogService;
 
     // ==========================================
-    // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
+    // 🛡️ CONTROL 6 RBAC: CPDO ADMIN VERIFICATION
     // ==========================================
     private Long getAdminId() {
         return userRepository.findAll().stream()
@@ -51,14 +50,31 @@ public class BarangayController {
                 .orElse(1L);
     }
 
+    private boolean isCpdoAdmin(User user) {
+        if (user == null || user.getRole() == null) return false;
+        String r = user.getRole().trim();
+        return r.equalsIgnoreCase("CPDO Admin") || r.equalsIgnoreCase("Admin");
+    }
+
     // ==========================================
-    // 1. ADD NEW BARANGAY (WITH VALIDATION)
+    // 1. ADD NEW BARANGAY (WITH RBAC, VALIDATION & SYSTEM AUDIT LOG)
     // ==========================================
     @PostMapping
     public ResponseEntity<?> createBarangay(
             @RequestBody Barangay barangay,
             @RequestParam(value = "userId", required = false) Long userId,
             HttpServletRequest request) {
+
+        // 🛡️ CONTROL 6 RBAC: Admin Verification
+        Long adminId = (userId != null) ? userId : getAdminId();
+        User adminActor = userRepository.findById(adminId).orElse(null);
+        if (!isCpdoAdmin(adminActor)) {
+            return ResponseEntity.status(403).body("Access Denied: Only CPDO Administrators can register new barangays.");
+        }
+
+        if (barangay == null || barangay.getBarangayName() == null || barangay.getBarangayName().trim().isEmpty()) {
+            return ResponseEntity.badRequest().body("Barangay name is mandatory.");
+        }
 
         String cleanedName = barangay.getBarangayName().trim();
 
@@ -69,13 +85,10 @@ public class BarangayController {
         barangay.setBarangayName(cleanedName);
         Barangay savedBarangay = barangayRepository.save(barangay);
 
-        // ⏱️ AUDIT LOG: Attributed to Admin
-        Long adminId = (userId != null) ? userId : getAdminId();
-        User adminActor = userRepository.findById(adminId).orElse(null);
-
+        // ⏱️ AUDIT LOG: Attributed to Admin under SYSTEM category (not USER)
         activityLogService.log(
                 adminActor,
-                "USER",
+                "SYSTEM",
                 "BARANGAY_CREATED",
                 "#BRGY-" + savedBarangay.getId(),
                 "Registered new Barangay territorial unit: '" + cleanedName + "'.",
@@ -121,7 +134,7 @@ public class BarangayController {
     }
 
     // ==========================================
-    // DASHBOARD SUMMARY (WITH USER INFO)
+    // DASHBOARD SUMMARY (EXCLUDES ARCHIVED / CLOSED TICKETS)
     // ==========================================
     @GetMapping("/dashboard-summary")
     public ResponseEntity<List<Map<String, Object>>> getDashboardSummary() {
@@ -148,7 +161,8 @@ public class BarangayController {
             long activeCount = 0;
             for (RoadReport r : reports) {
                 String status = r.getStatus() != null ? r.getStatus().toLowerCase() : "";
-                if (!status.equals("closed") && !status.equals("completed") && !status.equals("rejected")) {
+                // 🚀 EXCLUDES ARCHIVED TICKETS FROM COUNTING AS ACTIVE
+                if (!status.equals("closed") && !status.equals("completed") && !status.equals("rejected") && !status.equals("archived")) {
                     activeCount++;
                 }
             }
@@ -161,7 +175,7 @@ public class BarangayController {
     }
 
     // ==========================================
-    // UPDATE / RENAME A BARANGAY
+    // UPDATE / RENAME A BARANGAY (WITH RBAC & SYSTEM AUDIT LOG)
     // ==========================================
     @PutMapping("/{id}")
     public ResponseEntity<?> updateBarangay(
@@ -170,9 +184,20 @@ public class BarangayController {
             @RequestParam(value = "userId", required = false) Long userId,
             HttpServletRequest request) {
 
+        // 🛡️ CONTROL 6 RBAC: Admin Verification
+        Long adminId = (userId != null) ? userId : getAdminId();
+        User adminActor = userRepository.findById(adminId).orElse(null);
+        if (!isCpdoAdmin(adminActor)) {
+            return ResponseEntity.status(403).body("Access Denied: Only CPDO Administrators can rename or update barangay details.");
+        }
+
         Optional<Barangay> existingOpt = barangayRepository.findById(id);
         if (existingOpt.isEmpty()) {
             return ResponseEntity.notFound().build();
+        }
+
+        if (updatedInfo == null || updatedInfo.getBarangayName() == null || updatedInfo.getBarangayName().trim().isEmpty()) {
+            return ResponseEntity.badRequest().body("Barangay name cannot be empty.");
         }
 
         Barangay existingBarangay = existingOpt.get();
@@ -185,13 +210,10 @@ public class BarangayController {
         existingBarangay.setBarangayName(cleanedName);
         Barangay savedBarangay = barangayRepository.save(existingBarangay);
 
-        // ⏱️ AUDIT LOG: Attributed to Admin
-        Long adminId = (userId != null) ? userId : getAdminId();
-        User adminActor = userRepository.findById(adminId).orElse(null);
-
+        // ⏱️ AUDIT LOG: Attributed to Admin under SYSTEM category
         activityLogService.log(
                 adminActor,
-                "USER",
+                "SYSTEM",
                 "BARANGAY_UPDATED",
                 "#BRGY-" + savedBarangay.getId(),
                 "Updated Barangay territorial details/name to '" + cleanedName + "'.",

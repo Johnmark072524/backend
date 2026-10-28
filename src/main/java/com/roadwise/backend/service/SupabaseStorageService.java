@@ -4,10 +4,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.UUID;
 
 @Service
@@ -22,25 +24,32 @@ public class SupabaseStorageService {
     @Value("${supabase.bucket-name}")
     private String bucketName;
 
-    private final HttpClient httpClient = HttpClient.newHttpClient();
+    // 🛡️ CONTROL 19: Bounded HTTP Client with strict connection timeout (prevents thread starvation)
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(15))
+            .build();
 
     public String uploadImage(MultipartFile file) throws Exception {
         String originalName = file.getOriginalFilename() != null ? file.getOriginalFilename() : "image.jpg";
         String cleanFileName = UUID.randomUUID() + "_" + originalName.replaceAll("\\s+", "_");
         String uploadEndpoint = String.format("%s/storage/v1/object/%s/%s", supabaseUrl, bucketName, cleanFileName);
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(uploadEndpoint))
-                .header("Authorization", "Bearer " + serviceKey)
-                .header("Content-Type", file.getContentType() != null ? file.getContentType() : "image/jpeg")
-                .header("x-upsert", "true")
-                .POST(HttpRequest.BodyPublishers.ofByteArray(file.getBytes()))
-                .build();
+        // 🛡️ CONTROL 19: Stream payload directly with try-with-resources to ensure auto-closure
+        try (InputStream inputStream = file.getInputStream()) {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(uploadEndpoint))
+                    .header("Authorization", "Bearer " + serviceKey)
+                    .header("Content-Type", file.getContentType() != null ? file.getContentType() : "image/jpeg")
+                    .header("x-upsert", "true")
+                    .timeout(Duration.ofSeconds(30)) // Request timeout bounds long-hanging socket streams
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(inputStream.readAllBytes()))
+                    .build();
 
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
-        if (response.statusCode() != 200 && response.statusCode() != 201) {
-            throw new RuntimeException("Supabase upload failed [" + response.statusCode() + "]: " + response.body());
+            if (response.statusCode() != 200 && response.statusCode() != 201) {
+                throw new RuntimeException("Supabase upload failed [" + response.statusCode() + "]: " + response.body());
+            }
         }
 
         // Returns the permanent, cloud-hosted public CDN URL

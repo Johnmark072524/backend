@@ -42,28 +42,21 @@ public class UserController {
     @Autowired
     private ActivityLogService activityLogService;
 
-    // 🚀 INJECTED SUPABASE CLOUD STORAGE SERVICE
     @Autowired
     private SupabaseStorageService supabaseStorageService;
 
-    // 🔒 INJECT BCRYPT PASSWORD ENCODER
     @Autowired
     private PasswordEncoder passwordEncoder;
 
-    // 🌐 DYNAMIC FRONTEND DOMAIN INJECTION
     @Value("${frontend.url:https://roadwise-csjdm.com}")
     private String frontendUrl;
 
-    // 🛡️ CONTROL 2: STRICT PASSWORD COMPLEXITY REGEX (8+ chars, 1 uppercase, 1 digit, 1 special character)
     private static final Pattern PASSWORD_PATTERN = Pattern.compile("^(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&#]).{8,}$");
 
     private boolean isValidPassword(String password) {
         return password != null && PASSWORD_PATTERN.matcher(password).matches();
     }
 
-    // ==========================================
-    // 🚀 HELPER: DYNAMICALLY FIND ADMIN ID
-    // ==========================================
     private Long getAdminId() {
         return userRepository.findAll().stream()
                 .filter(user -> user.getRole() != null && (user.getRole().equalsIgnoreCase("CPDO Admin") || user.getRole().equalsIgnoreCase("Admin")))
@@ -124,13 +117,11 @@ public class UserController {
 
             User user = userOpt.get();
 
-            // ☁️ UPLOAD DIRECTLY TO SUPABASE OBJECT STORAGE
             String cloudAvatarUrl = supabaseStorageService.uploadImage(file);
 
             user.setProfilePicture(cloudAvatarUrl);
             userRepository.save(user);
 
-            // ⏱️ AUDIT LOG: AVATAR CHANGE
             activityLogService.log(
                     user,
                     "USER",
@@ -174,7 +165,6 @@ public class UserController {
         String currentPassword = payload.get("currentPassword");
         String newPassword = payload.get("newPassword");
 
-        // 🛡️ CONTROL 2 ENFORCEMENT: Reject weak passwords at API boundary
         if (!isValidPassword(newPassword)) {
             return ResponseEntity.status(400).body(Map.of("error",
                     "Password does not meet complexity requirements. It must be at least 8 characters long and contain at least one uppercase letter, one digit, and one special character (@$!%*?&#)."));
@@ -193,7 +183,6 @@ public class UserController {
             }
         }
 
-        // 🔒 SMART PASSWORD VERIFICATION (BCrypt with legacy fallback)
         boolean currentMatches = false;
         String storedPassword = user.getPassword();
 
@@ -227,7 +216,6 @@ public class UserController {
         }
 
         securityTracker.remove(id);
-        // 🔒 Store strictly salted BCrypt hash
         user.setPassword(passwordEncoder.encode(newPassword));
         userRepository.save(user);
 
@@ -263,14 +251,13 @@ public class UserController {
     }
 
     // ==========================================
-// 5. PROVISION NEW BARANGAY OFFICIAL ACCOUNT (CPDO ADMIN ONLY)
-// ==========================================
+    // 5. PROVISION NEW BARANGAY OFFICIAL ACCOUNT (CPDO ADMIN ONLY)
+    // ==========================================
     @PostMapping("/register")
     public ResponseEntity<?> registerOfficial(
             @RequestBody Map<String, String> payload,
             HttpServletRequest request) {
 
-        // 🛡️ CONTROL 8 PRIVILEGED ACTION GUARD: Verify Caller is Authenticated CPDO Admin
         String adminIdStr = payload.get("adminId");
         if (adminIdStr == null || adminIdStr.trim().isEmpty()) {
             return ResponseEntity.status(403).body(Map.of("error",
@@ -294,14 +281,12 @@ public class UserController {
 
         User adminActor = adminOpt.get();
 
-        // 🛡️ CONTROL 2 ENFORCEMENT: Reject weak provisioning passwords
         String rawPassword = payload.get("password");
         if (!isValidPassword(rawPassword)) {
             return ResponseEntity.status(400).body(Map.of("error",
                     "Password does not meet complexity requirements. It must be at least 8 characters long and contain at least one uppercase letter, one digit, and one special character (@$!%*?&#)."));
         }
 
-        // 🛡️ UNIQUE IDENTITY CHECKS
         String username = payload.get("username");
         if (userRepository.findByUsername(username).isPresent()) {
             return ResponseEntity.status(400).body(Map.of("error", "Username already exists!"));
@@ -318,12 +303,10 @@ public class UserController {
         newUser.setLastName(payload.get("lastName"));
         newUser.setEmail(email);
         newUser.setUsername(username);
-        // 🔒 Store salted BCrypt hash in DB (Control 1)
         newUser.setPassword(passwordEncoder.encode(rawPassword));
         newUser.setRole(payload.get("role") != null && !payload.get("role").trim().isEmpty() ? payload.get("role") : "BARANGAY");
         newUser.setStatus("Active");
 
-        // 🛡️ CONTROL 8 MUNICIPAL GOVERNANCE: Strictly 1 Active Official per Barangay
         if (payload.get("barangayId") != null && !payload.get("barangayId").isEmpty()) {
             Long brgyId = Long.parseLong(payload.get("barangayId"));
             List<User> existingOfficials = userRepository.findByBarangayId(brgyId);
@@ -350,7 +333,6 @@ public class UserController {
                 "ACCOUNT"
         );
 
-        // 📧 Email receives the raw temporary password so the human official can log in
         if (savedUser.getEmail() != null && !savedUser.getEmail().isEmpty()) {
             String subject = "Welcome to RoadWise - Your Account Credentials";
             String emailBody = "Hello " + savedUser.getFirstName() + ",\n\n" +
@@ -390,7 +372,7 @@ public class UserController {
     }
 
     // ==========================================
-    // 7. ADMIN: UPDATE OFFICIAL RECORD & STATUS
+    // 7. ADMIN: UPDATE OFFICIAL RECORD & STATUS (HIGH PRIVILEGE ACTION)
     // ==========================================
     @PutMapping("/{id}/manage")
     public ResponseEntity<?> manageUserRecord(
@@ -477,10 +459,7 @@ public class UserController {
         }
 
         User user = userOpt.get();
-        // 🔒 Store salted BCrypt hash of default password ("RoadWise2026!" strictly meets complexity requirements)
         user.setPassword(passwordEncoder.encode("RoadWise2026!"));
-
-        // 🛡️ UNLOCK ACCOUNT: Clear lockout penalty and reset failed attempts
         user.setFailedLoginAttempts(0);
         user.setLockoutUntil(null);
         userRepository.save(user);
@@ -539,7 +518,6 @@ public class UserController {
 
         User currentAdmin = currentAdminOpt.get();
 
-        // 🛡️ 1. SECURITY CHECK: Verify Outgoing Admin Password (BCrypt with fallback)
         boolean adminMatches = false;
         String storedAdminPass = currentAdmin.getPassword();
 
@@ -564,7 +542,6 @@ public class UserController {
             return ResponseEntity.status(401).body(Map.of("error", "Incorrect current password. Turnover authorization rejected."));
         }
 
-        // 🛡️ 2. UNIQUE CONFLICT CHECKS
         if (userRepository.findByUsername(newUsername).isPresent()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Username '" + newUsername + "' is already taken."));
         }
@@ -573,10 +550,8 @@ public class UserController {
             return ResponseEntity.badRequest().body(Map.of("error", "Official email '" + newEmail + "' is already registered to another user."));
         }
 
-        // 🛡️ 3. GENERATE SECURE TEMPORARY CREDENTIALS (Meets complexity: RoadWise@XXXX!)
         String tempPassword = "RoadWise@" + (1000 + new Random().nextInt(9000)) + "!";
 
-        // 4. PROVISION INCOMING SUCCESSOR
         User newAdmin = new User();
         newAdmin.setFirstName(newFirstName != null ? newFirstName.trim() : "");
         newAdmin.setMiddleName(newMiddleName != null ? newMiddleName.trim() : "");
@@ -584,7 +559,6 @@ public class UserController {
         newAdmin.setEmail(newEmail != null ? newEmail.trim() : "");
         newAdmin.setUsername(newUsername != null ? newUsername.trim() : "");
         newAdmin.setPhoneNumber(newPhone != null ? newPhone.trim() : "");
-        // 🔒 Store salted BCrypt hash
         newAdmin.setPassword(passwordEncoder.encode(tempPassword));
         newAdmin.setRole("CPDO Admin");
         newAdmin.setStatus("Active");
@@ -593,11 +567,9 @@ public class UserController {
 
         User savedNewAdmin = userRepository.save(newAdmin);
 
-        // 5. DEACTIVATE OUTGOING PREDECESSOR (Preserve audit integrity)
         currentAdmin.setStatus("Deactivated");
         userRepository.save(currentAdmin);
 
-        // 📋 6. WRITE PERMANENT SYSTEM ACTIVITY LOG
         String memoText = (memoNumber != null && !memoNumber.trim().isEmpty()) ? " [Memo Ref: " + memoNumber.trim() + "]" : "";
         activityLogService.log(
                 currentAdmin,
@@ -610,7 +582,6 @@ public class UserController {
                 request
         );
 
-        // 📧 7. SEND SUCCESSION DISPATCH EMAIL TO NEW ADMIN
         if (savedNewAdmin.getEmail() != null && !savedNewAdmin.getEmail().isEmpty()) {
             String subject = "RoadWise - Administrative Succession Credentials";
             String body = "Hello " + savedNewAdmin.getFirstName() + ",\n\n" +
@@ -629,7 +600,6 @@ public class UserController {
             }
         }
 
-        // 8. RETURN RESPONSE
         Map<String, Object> responseData = new HashMap<>();
         responseData.put("message", "Administrative office successfully turned over!");
         responseData.put("successorName", savedNewAdmin.getFirstName() + " " + savedNewAdmin.getLastName());
@@ -669,7 +639,6 @@ public class UserController {
 
         User currentCeo = currentCeoOpt.get();
 
-        // 🛡️ 1. SECURITY CHECK: Verify Outgoing CEO Password (BCrypt with fallback)
         boolean ceoMatches = false;
         String storedCeoPass = currentCeo.getPassword();
 
@@ -694,7 +663,6 @@ public class UserController {
             return ResponseEntity.status(401).body(Map.of("error", "Incorrect current password. Turnover authorization rejected."));
         }
 
-        // 🛡️ 2. UNIQUE CONFLICT CHECKS
         if (userRepository.findByUsername(newUsername).isPresent()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Username '" + newUsername + "' is already taken."));
         }
@@ -703,10 +671,8 @@ public class UserController {
             return ResponseEntity.badRequest().body(Map.of("error", "Official email '" + newEmail + "' is already registered to another user."));
         }
 
-        // 🛡️ 3. GENERATE SECURE TEMPORARY CREDENTIALS (Meets complexity: RoadWise@XXXX!)
         String tempPassword = "RoadWise@" + (1000 + new Random().nextInt(9000)) + "!";
 
-        // 4. PROVISION INCOMING SUCCESSOR
         User newCeo = new User();
         newCeo.setFirstName(newFirstName != null ? newFirstName.trim() : "");
         newCeo.setMiddleName(newMiddleName != null ? newMiddleName.trim() : "");
@@ -714,7 +680,6 @@ public class UserController {
         newCeo.setEmail(newEmail != null ? newEmail.trim() : "");
         newCeo.setUsername(newUsername != null ? newUsername.trim() : "");
         newCeo.setPhoneNumber(newPhone != null ? newPhone.trim() : "");
-        // 🔒 Store salted BCrypt hash
         newCeo.setPassword(passwordEncoder.encode(tempPassword));
         newCeo.setRole(currentCeo.getRole() != null ? currentCeo.getRole() : "ENGINEER");
         newCeo.setStatus("Active");
@@ -723,11 +688,9 @@ public class UserController {
 
         User savedNewCeo = userRepository.save(newCeo);
 
-        // 5. DEACTIVATE OUTGOING PREDECESSOR (Preserve audit integrity)
         currentCeo.setStatus("Deactivated");
         userRepository.save(currentCeo);
 
-        // 📋 6. WRITE SYSTEM ACTIVITY LOG
         String memoText = (memoNumber != null && !memoNumber.trim().isEmpty()) ? " [Memo Ref: " + memoNumber.trim() + "]" : "";
         activityLogService.log(
                 currentCeo,
@@ -740,7 +703,6 @@ public class UserController {
                 request
         );
 
-        // 📧 7. SEND SUCCESSION CREDENTIALS VIA EMAIL
         if (savedNewCeo.getEmail() != null && !savedNewCeo.getEmail().isEmpty()) {
             String subject = "RoadWise - City Engineer Succession Credentials";
             String body = "Hello " + savedNewCeo.getFirstName() + ",\n\n" +
@@ -759,7 +721,6 @@ public class UserController {
             }
         }
 
-        // 8. RETURN RESPONSE
         Map<String, Object> responseData = new HashMap<>();
         responseData.put("message", "City Engineering Office successfully turned over!");
         responseData.put("successorName", savedNewCeo.getFirstName() + " " + savedNewCeo.getLastName());

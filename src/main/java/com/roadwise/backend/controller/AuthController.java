@@ -133,7 +133,6 @@ public class AuthController {
 
             tracker.attempts++;
             if (tracker.attempts > 5) {
-                // 📐 Repaired subtraction math
                 long penaltySeconds = Math.min((long) Math.pow(2, tracker.attempts - 5), 900);
                 tracker.lockoutTime = LocalDateTime.now().plusSeconds(penaltySeconds);
 
@@ -187,12 +186,15 @@ public class AuthController {
             user.setFailedLoginAttempts(attempts);
 
             long penaltySeconds = 0;
-            if (attempts > 5) {
-                penaltySeconds = (long) Math.pow(2, attempts - 5);
+            // 🛡️ CONTROL 22: Activates progressive lockout & alerts CPDO on attempt 5
+            if (attempts >= 5) {
+                // Starts at 2 seconds on attempt 5 (2^(5-4) = 2s), doubles every attempt up to 15m
+                penaltySeconds = (long) Math.pow(2, attempts - 4);
                 penaltySeconds = Math.min(penaltySeconds, 900);
                 user.setLockoutUntil(LocalDateTime.now().plusSeconds(penaltySeconds));
 
-                if (attempts == 6 || attempts == 15) {
+                // 🔔 Dispatch prioritized security alert to CPDO Administrator on attempt 5 and 15
+                if (attempts == 5 || attempts == 15) {
                     notificationService.sendNotification(
                             getAdminId(),
                             "Security Alert: Brute-Force Activity",
@@ -206,7 +208,7 @@ public class AuthController {
             activityLogService.log(null, "AUTH", "AUTH_LOGIN_FAILED", formattedUserId,
                     "Failed login attempt for '" + username + "'. Total consecutive failures: " + attempts, "FAILED", request);
 
-            if (attempts > 5) {
+            if (attempts >= 5) {
                 return ResponseEntity.status(429).body(Map.of(
                         "error", "Too many failed attempts. Account temporarily locked for security. Please try again in " + penaltySeconds + " second(s).",
                         "retryAfterSeconds", penaltySeconds
@@ -305,7 +307,6 @@ public class AuthController {
                 return ResponseEntity.status(429).body(Map.of("error", "Maximum verification attempts exceeded. Verification code invalidated for security. Please log in again."));
             }
 
-            // 📐 Repaired subtraction
             int remaining = 3 - session.failedAttempts;
             activityLogService.log(attemptedUser, "AUTH", "AUTH_MFA_FAILED", formattedId,
                     "Invalid MFA verification code entered. " + remaining + " attempt(s) remaining.", "FAILED", request);
@@ -436,7 +437,6 @@ public class AuthController {
                 return ResponseEntity.status(429).body(Map.of("error", "Maximum verification attempts exceeded. Reset code invalidated for security. Please request a new code."));
             }
 
-            // 📐 Repaired subtraction
             int remaining = 3 - session.failedAttempts;
             activityLogService.log(attemptedUser, "AUTH", "AUTH_PASSWORD_RESET_FAILED", formattedId,
                     "Invalid password reset recovery OTP submitted. " + remaining + " attempt(s) remaining.", "FAILED", request);

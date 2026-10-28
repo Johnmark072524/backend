@@ -74,8 +74,8 @@ public class RoadReportController {
     private ReportStatusLogService reportStatusLogService;
 
     // ==========================================
-    // 🛡️ CONTROL 15: FILE UPLOAD SIZE & MIME ALLOW-LIST CONSTRAINTS
-    // ==========================================
+// 🛡️ CONTROL 15: FILE UPLOAD SIZE & MIME ALLOW-LIST CONSTRAINTS
+// ==========================================
     private static final long MAX_FILE_SIZE = 5L * 1024 * 1024; // Strict 5MB limit
     private static final Set<String> ALLOWED_IMAGE_TYPES = Set.of(
             "image/jpeg",

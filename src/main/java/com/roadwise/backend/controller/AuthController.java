@@ -74,16 +74,18 @@ public class AuthController {
     private static final Map<String, LoginAttemptTracker> loginTracker = new ConcurrentHashMap<>();
 
     // ==========================================
-    // 2. MFA & OTP TRACKER (WITH 3-ATTEMPT LOCKOUT)
+    // 2. MFA & OTP TRACKER (WITH 3-ATTEMPT LOCKOUT & 60s COOLDOWN)
     // ==========================================
     private static class MfaSession {
         String otp;
         LocalDateTime expiryTime;
+        LocalDateTime generatedAt; // 🛡️ CONTROL A3: Tracks creation timestamp for 60s cooldown
         int failedAttempts = 0;
 
         public MfaSession(String otp, LocalDateTime expiryTime) {
             this.otp = otp;
             this.expiryTime = expiryTime;
+            this.generatedAt = LocalDateTime.now();
             this.failedAttempts = 0;
         }
     }
@@ -188,12 +190,10 @@ public class AuthController {
             long penaltySeconds = 0;
             // 🛡️ CONTROL 22: Activates progressive lockout & alerts CPDO on attempt 5
             if (attempts >= 5) {
-                // Starts at 2 seconds on attempt 5 (2^(5-4) = 2s), doubles every attempt up to 15m
                 penaltySeconds = (long) Math.pow(2, attempts - 4);
                 penaltySeconds = Math.min(penaltySeconds, 900);
                 user.setLockoutUntil(LocalDateTime.now().plusSeconds(penaltySeconds));
 
-                // 🔔 Dispatch prioritized security alert to CPDO Administrator on attempt 5 and 15
                 if (attempts == 5 || attempts == 15) {
                     notificationService.sendNotification(
                             getAdminId(),
@@ -245,11 +245,26 @@ public class AuthController {
             return ResponseEntity.status(403).body(Map.of("error", "No official email is linked to this account. Cannot proceed with MFA. Contact Admin."));
         }
 
-        // ⏱️ 5-Minute Window for Active Login MFA
+        // 🛡️ CONTROL A3: 60-Second OTP Issuance Cooldown Guard
+        MfaSession existingSession = mfaTracker.get(user.getId());
+        if (existingSession != null && existingSession.generatedAt != null) {
+            long secondsElapsed = Duration.between(existingSession.generatedAt, LocalDateTime.now()).getSeconds();
+            if (secondsElapsed < 60) {
+                long waitSeconds = 60 - secondsElapsed;
+                return ResponseEntity.status(429).body(Map.of(
+                        "error", "A verification code was recently dispatched. Please wait " + waitSeconds + " second(s) before requesting a new code.",
+                        "retryAfterSeconds", waitSeconds,
+                        "mfaRequired", true,
+                        "userId", user.getId()
+                ));
+            }
+        }
+
+        // ⏱️ 5-Minute Window for Active Login MFA (TTL)
         String otp = String.format("%06d", new Random().nextInt(999999));
         mfaTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(5)));
 
-        // 🛡️ CONTROL 18: Masked telemetry (Never log plaintext OTP or secrets to terminal console)
+        // 🛡️ CONTROL 18: Masked telemetry
         System.out.println(">>> [AUTH AUDIT] 6-digit MFA OTP generated for User ID: " + user.getId() + " (Token excluded from terminal output).");
 
         String subject = "RoadWise - Login Verification Code";
@@ -272,6 +287,59 @@ public class AuthController {
         responseData.put("message", "A 6-digit code has been sent to your email.");
 
         return ResponseEntity.ok(responseData);
+    }
+
+    // ==========================================
+    // 3B. 🛡️ CONTROL A3: RESEND MFA OTP (WITH 60-SECOND COOLDOWN)
+    // ==========================================
+    @PostMapping("/resend-mfa")
+    public ResponseEntity<?> resendMfa(@RequestBody Map<String, Object> payload, HttpServletRequest request) {
+        Object rawId = payload.get("userId");
+        if (rawId == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Missing user identity for resending code."));
+        }
+
+        Long userId = Long.valueOf(rawId.toString());
+        Optional<User> userOpt = userRepository.findById(userId);
+        if (userOpt.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of("error", "User session not found."));
+        }
+
+        User user = userOpt.get();
+
+        // 🛡️ CONTROL A3: Enforce strict 60-second cooldown
+        MfaSession existingSession = mfaTracker.get(userId);
+        if (existingSession != null && existingSession.generatedAt != null) {
+            long secondsElapsed = Duration.between(existingSession.generatedAt, LocalDateTime.now()).getSeconds();
+            if (secondsElapsed < 60) {
+                long waitSeconds = 60 - secondsElapsed;
+                return ResponseEntity.status(429).body(Map.of(
+                        "error", "Please wait " + waitSeconds + " second(s) before requesting another verification code.",
+                        "retryAfterSeconds", waitSeconds
+                ));
+            }
+        }
+
+        // Generate fresh OTP with 5-minute TTL
+        String otp = String.format("%06d", new Random().nextInt(999999));
+        mfaTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(5)));
+
+        String subject = "RoadWise - Login Verification Code";
+        String body = "Hello " + user.getFirstName() + ",\n\n" +
+                "Your new Multi-Factor Authentication (MFA) code is: " + otp + "\n\n" +
+                "This code will expire in 5 minutes. Do not share this code with anyone.\n\n" +
+                "If you did not attempt to log in, please contact the CPDO Administrator immediately.";
+
+        try {
+            emailService.sendEmail(user.getEmail(), subject, body);
+        } catch (Exception e) {
+            System.err.println(">>> [WARN] SMTP Delivery failed: " + e.getMessage());
+        }
+
+        activityLogService.log(user, "AUTH", "AUTH_MFA_RESENT", String.format("#USR-%04d", user.getId()),
+                "User requested new MFA verification code. Dispatched to registered email.", "SUCCESS", request);
+
+        return ResponseEntity.ok(Map.of("message", "A new 6-digit verification code has been dispatched to your email."));
     }
 
     // ==========================================
@@ -300,11 +368,14 @@ public class AuthController {
             String formattedId = String.format("#USR-%04d", userId);
 
             if (session.failedAttempts >= 3) {
-                mfaTracker.remove(userId);
+                mfaTracker.remove(userId); // Atomic invalidation
                 activityLogService.log(attemptedUser, "SECURITY", "MFA_ATTEMPTS_EXCEEDED", formattedId,
                         "MFA code invalidated after 3 consecutive failed attempts.", "WARNING", request);
 
-                return ResponseEntity.status(429).body(Map.of("error", "Maximum verification attempts exceeded. Verification code invalidated for security. Please log in again."));
+                return ResponseEntity.status(429).body(Map.of(
+                        "error", "Maximum verification attempts exceeded. Verification code invalidated for security. Please log in again.",
+                        "invalidated", true
+                ));
             }
 
             int remaining = 3 - session.failedAttempts;
@@ -314,7 +385,7 @@ public class AuthController {
             return ResponseEntity.status(401).body(Map.of("error", "Invalid verification code. " + remaining + " attempt(s) remaining."));
         }
 
-        // 🛡️ ATOMIC SINGLE-USE INVALIDATION
+        // 🛡️ ATOMIC SINGLE-USE INVALIDATION (Prevents replay attacks)
         mfaTracker.remove(userId);
 
         Optional<User> userOpt = userRepository.findById(userId);
@@ -353,7 +424,7 @@ public class AuthController {
     }
 
     // ==========================================
-    // 5. FORGOT PASSWORD REQUEST OTP (10-MINUTE EXPIRY)
+    // 5. FORGOT PASSWORD REQUEST OTP (10-MINUTE EXPIRY & 60s COOLDOWN)
     // ==========================================
     @PostMapping("/forgot-password/request")
     public ResponseEntity<?> requestPasswordReset(@RequestBody Map<String, String> payload, HttpServletRequest request) {
@@ -367,10 +438,22 @@ public class AuthController {
         User user = userOpt.get();
         String formattedUserId = String.format("#USR-%04d", user.getId());
 
+        // 🛡️ CONTROL A3: 60-Second Cooldown on Password Reset Code Generation
+        MfaSession existingReset = resetTracker.get(user.getId());
+        if (existingReset != null && existingReset.generatedAt != null) {
+            long secondsElapsed = Duration.between(existingReset.generatedAt, LocalDateTime.now()).getSeconds();
+            if (secondsElapsed < 60) {
+                long waitSeconds = 60 - secondsElapsed;
+                return ResponseEntity.status(429).body(Map.of(
+                        "error", "A recovery code was recently sent. Please wait " + waitSeconds + " second(s) before requesting a new code.",
+                        "retryAfterSeconds", waitSeconds
+                ));
+            }
+        }
+
         String otp = String.format("%06d", new Random().nextInt(999999));
         resetTracker.put(user.getId(), new MfaSession(otp, LocalDateTime.now().plusMinutes(10)));
 
-        // 🛡️ CONTROL 18: Masked telemetry (Never log plaintext recovery codes to terminal console)
         System.out.println(">>> [AUTH AUDIT] Password recovery OTP generated for User ID: " + user.getId() + " (Token excluded from terminal output).");
 
         String subject = "RoadWise - Password Reset Code";

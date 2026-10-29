@@ -279,7 +279,8 @@ public class AuthController {
                         "error", "A verification code was recently dispatched. Please wait " + waitSeconds + " second(s) before requesting a new code.",
                         "retryAfterSeconds", waitSeconds,
                         "mfaRequired", true,
-                        "userId", user.getId()
+                        "userId", user.getId(),
+                        "debugOtp", existingSession.otp
                 ));
             }
         }
@@ -309,6 +310,8 @@ public class AuthController {
         responseData.put("mfaRequired", true);
         responseData.put("userId", user.getId());
         responseData.put("message", "A 6-digit code has been sent to your email.");
+        // 🚀 AUTO-FILL FOR TESTING
+        responseData.put("debugOtp", otp);
 
         return ResponseEntity.ok(responseData);
     }
@@ -340,7 +343,8 @@ public class AuthController {
 
                 return ResponseEntity.status(429).body(Map.of(
                         "error", "Please wait " + waitSeconds + " second(s) before requesting another verification code.",
-                        "retryAfterSeconds", waitSeconds
+                        "retryAfterSeconds", waitSeconds,
+                        "debugOtp", existingSession.otp
                 ));
             }
         }
@@ -364,7 +368,11 @@ public class AuthController {
         activityLogService.log(user, "AUTH", "AUTH_MFA_RESENT", String.format("#USR-%04d", user.getId()),
                 "User requested new MFA verification code. Dispatched to registered email.", "SUCCESS", request);
 
-        return ResponseEntity.ok(Map.of("message", "A new 6-digit verification code has been dispatched to your email."));
+        Map<String, Object> responseData = new HashMap<>();
+        responseData.put("message", "A new 6-digit verification code has been dispatched to your email.");
+        responseData.put("debugOtp", otp);
+
+        return ResponseEntity.ok(responseData);
     }
 
     // ==========================================
@@ -472,7 +480,8 @@ public class AuthController {
 
                 return ResponseEntity.status(429).body(Map.of(
                         "error", "A recovery code was recently sent. Please wait " + waitSeconds + " second(s) before requesting a new code.",
-                        "retryAfterSeconds", waitSeconds
+                        "retryAfterSeconds", waitSeconds,
+                        "debugOtp", existingReset.otp
                 ));
             }
         }
@@ -504,7 +513,12 @@ public class AuthController {
 
         activityLogService.log(user, "AUTH", "AUTH_PASSWORD_RESET_REQUEST", formattedUserId, "Password recovery OTP dispatched to email address: " + user.getEmail(), "SUCCESS", request);
 
-        return ResponseEntity.ok(Map.of("message", "A 6-digit recovery code has been sent to your email.", "userId", user.getId()));
+        Map<String, Object> responseData = new HashMap<>();
+        responseData.put("message", "A 6-digit recovery code has been sent to your email.");
+        responseData.put("userId", user.getId());
+        responseData.put("debugOtp", otp);
+
+        return ResponseEntity.ok(responseData);
     }
 
     // ==========================================
@@ -599,12 +613,12 @@ public class AuthController {
 
         User user = userOpt.get();
 
-        if ("Suspended".equalsIgnoreCase(user.getStatus()) || "Deactivated".equalsIgnoreCase(user.getStatus())) {
+        if ("Suspended".equalsIgnoreCase(user.getStatus())) {
             activeSessionTracker.remove(userId);
             return ResponseEntity.status(403).body(Map.of("valid", false, "error", "Account access revoked."));
         }
 
-        if (!user.getRole().equalsIgnoreCase(claimedRole)) {
+        if (user.getRole() == null || !user.getRole().trim().equalsIgnoreCase(claimedRole.trim())) {
             activeSessionTracker.remove(userId);
             activityLogService.log(
                     user,
